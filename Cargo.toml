@@ -1,0 +1,27 @@
+[package]
+name = "netperf"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[profile.dev]
+opt-level = 0
+
+[[bin]]
+name = "sender"
+path = "src/sender.rs"
+
+[[bin]]
+name = "receiver"
+path = "src/receiver.rs"
+
+[dependencies]
+toml = "0.5.10"
+serde = "1.0.152"
+serde_derive = "1.0.152"
+arrayvec = "0.7.2"
+rand = "0.8.5"
+fastping-rs = "0.2.3"
+icmp-socket = "0.2.0"
+ctrlc = "3.2.4"
