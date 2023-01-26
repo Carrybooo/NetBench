@@ -100,15 +100,16 @@ fn main() {
                                 packet.set_payload(&serialized_payload.as_slice());
                                 match tx.send_to(packet, IpAddr::V4(dist_addr)){
                                     Ok(_)=>{println!("sent total packet count: {}", total_packets)}
-                                    Err(e)=>{println!("error while sending partial packet count : {}", e)}
+                                    Err(e)=>{println!("error while sending final packet count : {}", e)}
                                 }
                                 match rcv_iterator.next(){ //NEED A FINAL ACK before leaving
                                     Ok((ack_packet, source)) => {
                                         if source == dist_addr{
                                             let ack_payload : BenchPayload = bincode::deserialize(ack_packet.payload()).unwrap();
-                                            if ack_payload.step == 1 && ack_payload.payload_type == (FinishAnswer as u8){
+                                            if ack_payload.step == 1 && ack_payload.payload_type == (FinishCall as u8){
                                                 call_ack = true;
                                                 terminate = true;
+                                                println!("Last finishcall received. Leaving.");
                                             }
                                         }
                                     }
@@ -133,7 +134,7 @@ fn main() {
             println!("seq: {}, timestamp: {:?}", key, value);
         }
     }
-    
+
 }
 
 
