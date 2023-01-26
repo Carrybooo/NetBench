@@ -44,6 +44,7 @@ fn main() {
     let mut rcv_iterator = ipv4_packet_iter(&mut rx);
     let mut total_packets: u64 = 0;
     let mut partial_packets: u64 = 0;
+    let mut last_rcv_seq: u64 = 0;
     let mut call_ack = false;
     let mut terminate = false;
     let mut packet_map: BTreeMap<u64, (SystemTime)> = BTreeMap::new();
@@ -52,7 +53,6 @@ fn main() {
             Ok((packet,source)) => {
                 if source == dist_addr{
                     let payload: BenchPayload = bincode::deserialize(packet.payload()).unwrap();
-                    println!("received with seq_number: {}", payload.seq);
 
                     match payload.payload_type{
                         0 => { // SEQUENCE PAYLOAD
@@ -63,6 +63,12 @@ fn main() {
                             total_packets += 1;
                             partial_packets += 1;
                             packet_map.insert(payload.seq, payload.time);
+
+                            //Detect and print drops
+                            if (last_rcv_seq + 1) < payload.seq {
+                                println!("The following packets have never been received : [{}..{}].", last_rcv_seq+1, payload.seq-1);
+                            };
+                            last_rcv_seq = payload.seq.clone();
                         },
 
                         1 => {/* TODO CLOCK TO IMPLEMENT */},
@@ -122,7 +128,12 @@ fn main() {
     }
 
     //TODO when terminated !!!
-
+    for i in 0..packet_map.len(){
+        if let Some((key, value)) = packet_map.pop_first(){
+            println!("seq: {}, timestamp: {:?}", key, value);
+        }
+    }
+    
 }
 
 
