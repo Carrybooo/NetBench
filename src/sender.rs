@@ -164,8 +164,9 @@ fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, port: u16, run_main: A
                                 if source == dist_addr{
                                     let rcv_payload : BenchPayload = bincode::deserialize(rcv_packet.payload()).unwrap();
                                     if rcv_payload.payload_type == (UpdateAnswer as u8){
-                                        let partial_receiver_count = rcv_payload.count as i128;
+                                        let partial_receiver_count = rcv_payload.count.clone() as i128;
                                         partial_count_received = true;
+                                        println!("DEBUG, partialcount received : {}", partial_receiver_count);
                                     }
                                 }
                             }
@@ -176,26 +177,27 @@ fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, port: u16, run_main: A
                     Err(e)=>{println!("Error while sending UpdateCall packet: {}", e)}
                 }
             }//COUNT RECEIVED
+            println!("DEBUG, purging...");
             purge_receiver(&mut rcv_iterator);
-
+            println!("DEBUG, purged");
+            
         /// PRINTING BLOC
             let partial_time: u128 = partial_start.elapsed().as_millis();
             let partial_speed: f64 = (partial_total_packets as f64 * 1448f64 / 1000f64 / (partial_time as f64/1000f64)).round();
-            let partial_delivered_count: i128 = partial_total_packets-(partial_total_packets-partial_receiver_count);
-            let partial_delivery_ratio: f64 = ((partial_delivered_count as f64 / partial_total_packets as f64)*100.0).round();
+            let partial_delivery_ratio: f64 = ((partial_receiver_count as f64 / partial_total_packets as f64)*100.0).round();
             println!( //PARTIAL PRINT
                 "Partial average speed : {}Ko/s\
                 \nPartial packet delivery ratio : {}% ({} delivered / {} total)", 
                 partial_speed, 
                 partial_delivery_ratio, 
-                partial_delivered_count, 
+                partial_receiver_count, 
                 partial_total_packets
             );
             partial_total_packets = 0;
             partial_start = Instant::now();
             print_count_tcp.store(2, Ordering::SeqCst); //trigger the print of the next thread (icmp_ping)
         }
-    }
+    }//MAIN LOOP END
 
     while print_count_tcp.load(Ordering::SeqCst)!=11 {    //waiting for LAST PRINT BEFORE CLOSING, triggered by sync_thread
         thread::sleep(Duration::from_millis(100));
@@ -215,13 +217,15 @@ fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, port: u16, run_main: A
                     Ok(Some((rcv_packet,source))) => {
                         if source == dist_addr{
                             let rcv_payload : BenchPayload = bincode::deserialize(rcv_packet.payload()).unwrap();
-                            if rcv_payload.payload_type == (UpdateAnswer as u8){
-                                let final_receiver_count = rcv_payload.count as i128;
+                            if rcv_payload.payload_type == (FinishAnswer as u8){
+                                let final_receiver_count = rcv_payload.count.clone() as i128;
+                                final_count_received = true;
+                                println!("DEBUG, finalreceivercount received : {}", final_receiver_count);
                             }
                         }
                     }
                     Ok(None) => {println!("Timeout reached while iterating on receiver for FinishCall answer")}
-                    Err(e) => {println!("Error while iterating on receiver for UpdateCall answer: {}", e)}
+                    Err(e) => {println!("Error while iterating on receiver for FinishCall answer: {}", e)}
                 }
             }
             Err(e)=>{println!("Error while sending UpdateCall packet: {}", e)}
@@ -238,16 +242,14 @@ fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, port: u16, run_main: A
         let serialized_payload = bincode::serialize(&payload).unwrap();
         packet.set_payload(&serialized_payload.as_slice());
         match tx.send_to(packet, IpAddr::V4(dist_addr)){
-            Ok(_)=>{}
+            Ok(_)=>{println!("DEBUG, finishcall sent with payload.step=1");}
             Err(e)=>{println!("Error while sending UpdateCall acknoledgement: {}", e)}
         }
-        let mut receiver_stopped = false;
         match rcv_iterator.next_with_timeout(Duration::from_millis(500)) {
             Err(e) => {println!("Error while purging the iterator after the finish call: {e}")},
             Ok(None) => {receiver_stopped=true},
             Ok(_) => {}
-        }
-        
+        }        
     }
 
     //PRINT THE BINARY RESULTING TREE
@@ -259,14 +261,13 @@ fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, port: u16, run_main: A
 
     let total_time: u128 = start.elapsed().as_millis();
     let total_speed: f64 = (total_packets as f64 * 1448f64 / 1000f64 / (total_time as f64/1000f64)).round();
-    let total_delivered_count: i128 = total_packets-(total_packets-final_receiver_count);
-    let total_delivery_ratio: f64 = ((total_delivered_count as f64 / total_packets as f64)*100.0).round();
+    let total_delivery_ratio: f64 = ((final_receiver_count as f64 / total_packets as f64)*100.0).round();
     println!( //LAST PRINT
         "Partial average speed : {}Ko/s\
         \nPartial packet delivery ratio : {}% ({} delivered / {} total)", 
         total_speed, 
         total_delivery_ratio, 
-        total_delivered_count, 
+        final_receiver_count, 
         total_packets
     );
     print_count_tcp.store(12, Ordering::SeqCst); //trigger the last print of the next thread (icmp_ping)
@@ -297,6 +298,7 @@ fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: A
                     //println!("Ping out of time on: {}.", addr);
                 }
                 Receive { addr:_, rtt } => { //Compute the average (and partial) data at each new ping
+                    println!("debugPING: rtt (nanos) = {}",rtt.as_nanos());
                     average_rtt = ((ping_number*average_rtt)+rtt.as_millis()as i128)/(ping_number+1);
                     partial_average_rtt = ((partial_ping_number*partial_average_rtt)+rtt.as_millis()as i128)/(partial_ping_number+1);
                     ping_number += 1;
