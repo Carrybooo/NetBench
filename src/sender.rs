@@ -310,7 +310,7 @@ fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: A
                     partial_ping_number += 1;
                 }
             },
-            Err(_) => panic!("Worker threads disconnected before the solution was found!"),
+            Err(_) => {}, //ping timeout -> not critical…
         }
         
         if print_count_ping.load(Ordering::SeqCst)==2 {   // PERIODIC STAT PRINT triggered after the main_thread periodic print
