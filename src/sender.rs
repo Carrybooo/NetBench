@@ -1,20 +1,35 @@
+#![allow(unused)]
+
 mod reader;
+mod encapsuler;
 use crate::reader::config_reader::{Config,read_config};
+use crate::encapsuler::encapsuler::{BenchPayload, init_ipv4_packet};
+use crate::encapsuler::encapsuler::PayloadType::*;
+
+use serde::{Serialize, Deserialize};
+use bincode;
 
 use arrayvec::ArrayVec;
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::process::exit;
-
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
-use std::thread;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering, AtomicU16};
 use std::time::{Instant, Duration};
 
-use fastping_rs::PingResult::{Idle, Receive};
-use fastping_rs::Pinger;
+use std::thread;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering, AtomicU16}};
+
+use fastping_rs::{Pinger, PingResult::{Idle, Receive}};
+
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 
 use icmp_socket::{IcmpSocket, IcmpSocket4, Icmpv4Packet, Icmpv4Message};
+
+use pnet::packet::Packet;
+use pnet::packet::ip::{IpNextHeaderProtocols, IpNextHeaderProtocol};
+use pnet::packet::ipv4::{Ipv4Packet, Ipv4, MutableIpv4Packet, checksum};
+use pnet::transport::{transport_channel, TransportReceiver, ipv4_packet_iter};
+use pnet::transport::TransportChannelType::Layer3;
+
 
 fn main() {
     
@@ -38,7 +53,7 @@ fn main() {
     //init atomic variables, which are used to access data accross threads
     let atomic_runner:Arc<AtomicBool> = Arc::new(AtomicBool::new(true));//runner
     let run_sync:Arc<AtomicBool> = atomic_runner.clone();//clones for each thread
-    let run_tcp:Arc<AtomicBool> = atomic_runner.clone();
+    let run_main:Arc<AtomicBool> = atomic_runner.clone();
     let run_ping:Arc<AtomicBool> = atomic_runner.clone();
     let run_route:Arc<AtomicBool> = atomic_runner.clone();
     let atomic_print_counter:Arc<AtomicU16> = Arc::new(AtomicU16::new(0));//print-sync
@@ -52,8 +67,8 @@ fn main() {
         sync(run_sync, print_count_sync);
     }).unwrap();
 
-    let tcp_connection: thread::JoinHandle<()> = thread::Builder::new().name("TCP_thread".to_string()).spawn(move || {
-        tcp_connection(dist_addr, config.tcp_port, run_tcp, print_count_tcp);
+    let main_thread: thread::JoinHandle<()> = thread::Builder::new().name("main_thread".to_string()).spawn(move || {
+        main_thread(local_addr, dist_addr, config.tcp_port, run_main, print_count_tcp);
     }).unwrap();
 
     let icmp_ping: thread::JoinHandle<()> = thread::Builder::new().name("ICMP_ping_thread".to_string()).spawn(move || {
@@ -68,12 +83,12 @@ fn main() {
     ctrlc::set_handler(move || {
         atomic_runner.store(false, Ordering::SeqCst);
         println!("\n\n\n=============================EXITING=============================");
-        thread::sleep(Duration::from_secs(1));
+        thread::sleep(Duration::from_millis(500));
     }).expect("Error setting Ctrl-C handler");
     
     //wait for every thread to finish
     sync.join().expect("Erreur lors de la fermeture du thread sync_thread");
-    tcp_connection.join().expect("Erreur lors de la fermeture du thread TCP_thread");
+    main_thread.join().expect("Erreur lors de la fermeture du thread main_thread");
     icmp_ping.join().expect("Erreur lors de la fermeture du thread ICMP_ping_thread");
     icmp_route.join().expect("Erreur lors de la fermeture du thread ICMP_route_thread");
 }
@@ -96,60 +111,101 @@ fn sync(run_print: Arc<AtomicBool>, print_count_sync: Arc<AtomicU16>){
 }
 
 
+
+
 //********************************************************************************************************************************
 // Fonction tcp connection --- used to measure average throughput and packet drop ratio. 
-fn tcp_connection(dist_addr: Ipv4Addr, port: u16, run_tcp: Arc<AtomicBool>, print_count_tcp: Arc<AtomicU16>){
-    //init socket and TCPstream
-    let distant_socket: SocketAddr = SocketAddr::new(IpAddr::V4(dist_addr), port);
-    let mut stream: TcpStream = TcpStream::connect(distant_socket).unwrap();
-    stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
-    stream.set_write_timeout(Some(Duration::from_millis(200))).unwrap();
+fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, port: u16, run_main: Arc<AtomicBool>, print_count_tcp: Arc<AtomicU16>){
+    
+    //RAW SOCKET TESTER
+    // use std::os::unix::io::AsRawFd;
+    // use std::net::SocketAddrV4;
+    // use std::mem::MaybeUninit;
+    // use std::io::Error;
+    // use std::io::ErrorKind;
+    // use libc::{socket, AF_INET, SOCK_RAW, IPPROTO_RAW};
+    // let sock = unsafe {socket(AF_INET, SOCK_RAW, IPPROTO_RAW) };
+    // println!("SOCK:{}", sock);
+    // if sock < 0 {
+    //     let err = Error::last_os_error();
+    //     if err.kind() == ErrorKind::PermissionDenied {
+    //         println!("Kernel does not allow raw sockets");
+    //     }
+    // }
+
+    /////////////////////////////////////////////////******************************** */
+    //init socket and TCPstream 
+    
+    // let distant_socket: SocketAddr = SocketAddr::new(IpAddr::V4(dist_addr), port);
+    // let mut stream: TcpStream = TcpStream::connect(distant_socket).unwrap();
+    // stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+    // stream.set_write_timeout(Some(Duration::from_millis(200))).unwrap();
+    
 
     //Init buffers and other variables
-    let mut array_vec: ArrayVec<u8, 1448> = ArrayVec::new();
-        for _ in 0..array_vec.capacity() {
-            array_vec.push(rand::random()); //INIT THE FUTURE WRITE BUFFER WITH FULL RANDOM VALUES (here packet size will be 1448 Bytes so 64kiB)
-        }
-    let write_buffer: [u8; 1448] = array_vec.into_inner().unwrap();
+    // let mut array_vec: ArrayVec<u8, 1448> = ArrayVec::new();
+    //     for _ in 0..array_vec.capacity() {
+    //         array_vec.push(rand::random()); //INIT THE FUTURE WRITE BUFFER WITH FULL RANDOM VALUES (here packet size will be 1448 Bytes so 64kiB)
+    //     }
+    // let write_buffer: [u8; 1448] = array_vec.into_inner().unwrap();
     let mut total_packets: i128 = 0;
     let start: Instant = Instant::now();
     let mut partial_total_packets: i128 = 0;
     let mut partial_start: Instant = Instant::now();
-    let mut buff: [u8; 1448];
 
-    while run_tcp.load(Ordering::SeqCst) { //MAIN LOOP OF THE THREAD running when the atomic runner bool is true
-        let write_buffer_clone: [u8; 1448] = write_buffer.clone();
-        match stream.write(&write_buffer_clone) {
-            Ok(_) => {total_packets += 1; partial_total_packets += 1;},
-            Err(_) => {},
+    let (mut tx, rx) = transport_channel(4096, Layer3(IpNextHeaderProtocol::new(254))).expect("Error while creating transport channel");
+    let mut sequence_number = 0u64;
+    let mut packet_buffer = [0u8; 1024];
+    
+
+    while run_main.load(Ordering::SeqCst) { //MAIN LOOP OF THE THREAD running when the atomic runner bool is true
+        // let write_buffer_clone: [u8; 1448] = write_buffer.clone();
+        // 
+        // match stream.write(&write_buffer_clone) {
+        //     Ok(_) => {total_packets += 1; partial_total_packets += 1;},
+        //     Err(_) => {},
+        // }
+        thread::sleep(Duration::from_millis(100));
+        let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet
+        let mut packet_payload = BenchPayload::new(Sequence as u8); //new payload type 0 -> type Sequence
+        packet_payload.seq= sequence_number.clone(); //set sequence number field
+        
+        let serialized_payload = bincode::serialize(&packet_payload).unwrap();
+        packet.set_payload(&serialized_payload.as_slice());
+
+        match tx.send_to(packet, IpAddr::V4(dist_addr)){
+            Ok(a)=>{
+                total_packets += 1; partial_total_packets += 1; sequence_number += 1; //increment all variables
+            }
+            Err(e)=>{println!("error while sending packet : {}", e)}
         }
         
         if print_count_tcp.load(Ordering::SeqCst)==1 {           // PERIODIC STATS PRINT
 
-            buff = [0; 1448]; //reset the buffer before writing what we receive into it
-            let mut comparer = buff.clone();
-            while comparer == [0; 1448] { //check loop to ensure we got a good response
-                stream.flush().unwrap();
-                stream.write("updatecall".as_bytes()).ok();
-                stream.flush().unwrap();
-                stream.read(&mut buff).ok();
-                comparer = buff.clone();
-            }
-            let partial_time: u128 = partial_start.elapsed().as_millis();
-            let partial_speed: f64 = (partial_total_packets as f64 * 1448f64 / 1000f64 / (partial_time as f64/1000f64)).round();
-            let partial_receiver_count: i128 = String::from_utf8(buff.to_vec()).unwrap().trim_end_matches('\0').parse().unwrap();
-            let partial_drop_count: i128 = partial_receiver_count-partial_total_packets;
-            let partial_drop_ratio: f64 = ((partial_drop_count as f64 / partial_total_packets as f64)*100.0).round();
-            println!( //PARTIAL PRINT
-                "Partial average speed : {}Ko/s\
-                \nPartial packet drop ratio : {}% ({} dropped count/{})", 
-                partial_speed, 
-                partial_drop_ratio, 
-                partial_drop_count, 
-                partial_total_packets
-            );
-            partial_total_packets = 0;
-            partial_start = Instant::now();
+        //     buff = [0; 1448]; //reset the buffer before writing what we receive into it
+        //     let mut comparer = buff.clone();
+        //     while comparer == [0; 1448] { //check loop to ensure we got a good response
+        //         stream.flush().unwrap();
+        //         stream.write("updatecall".as_bytes()).ok();
+        //         stream.flush().unwrap();
+        //         stream.read(&mut buff).ok();
+        //         comparer = buff.clone();
+        //     }
+        //     let partial_time: u128 = partial_start.elapsed().as_millis();
+        //     let partial_speed: f64 = (partial_total_packets as f64 * 1448f64 / 1000f64 / (partial_time as f64/1000f64)).round();
+        //     let partial_receiver_count: i128 = String::from_utf8(buff.to_vec()).unwrap().trim_end_matches('\0').parse().unwrap();
+        //     let partial_drop_count: i128 = partial_receiver_count-partial_total_packets;
+        //     let partial_drop_ratio: f64 = ((partial_drop_count as f64 / partial_total_packets as f64)*100.0).round();
+        //     println!( //PARTIAL PRINT
+        //         "Partial average speed : {}Ko/s\
+        //         \nPartial packet drop ratio : {}% ({} dropped count/{})", 
+        //         partial_speed, 
+        //         partial_drop_ratio, 
+        //         partial_drop_count, 
+        //         partial_total_packets
+        //     );
+        //     partial_total_packets = 0;
+        //     partial_start = Instant::now();
             print_count_tcp.store(2, Ordering::SeqCst); //trigger the print of the next thread (icmp_ping)
         }
     }
@@ -158,33 +214,33 @@ fn tcp_connection(dist_addr: Ipv4Addr, port: u16, run_tcp: Arc<AtomicBool>, prin
         thread::sleep(Duration::from_millis(100));
     }
 
-    buff = [0; 1448]; //reset the buffer before writing what we receive into it
-    let mut comparer = buff.clone();
-    while comparer == [0; 1448] { //check loop to ensure we got a good response
-        stream.flush().unwrap();
-        stream.write("finishcall".as_bytes()).ok();
-        stream.flush().unwrap();
-        stream.read(&mut buff).ok();
-        comparer = buff.clone();
-    }
-    let receiver_count: i128 = String::from_utf8(buff.to_vec()).unwrap().trim_end_matches('\0').parse().unwrap();
-    let total_time:u64 = start.elapsed().as_secs();
-    let total_speed: i128 = total_packets*1448/1000/total_time as i128;
-    let drop_count: i128 = receiver_count-total_packets;
-    let drop_ratio: f64 = ((drop_count as f64 / total_packets as f64)*100.0).round();
+    // buff = [0; 1448]; //reset the buffer before writing what we receive into it
+    // let mut comparer = buff.clone();
+    // while comparer == [0; 1448] { //check loop to ensure we got a good response
+    //     stream.flush().unwrap();
+    //     stream.write("finishcall".as_bytes()).ok();
+    //     stream.flush().unwrap();
+    //     stream.read(&mut buff).ok();
+    //     comparer = buff.clone();
+    // }
+    // let receiver_count: i128 = String::from_utf8(buff.to_vec()).unwrap().trim_end_matches('\0').parse().unwrap();
+    // let total_time:u64 = start.elapsed().as_secs();
+    // let total_speed: i128 = total_packets*1448/1000/total_time as i128;
+    // let drop_count: i128 = receiver_count-total_packets;
+    // let drop_ratio: f64 = ((drop_count as f64 / total_packets as f64)*100.0).round();
  
-    println!( //LAST PRINT
-        "Total time of the benchmark : {}secs\
-        \nTotal bytes transfered : {}Mo\
-        \nTotal average speed : {} Ko/s\
-        \nTotal packet drop ratio : {}% ({} dropped count/{} total)", 
-        total_time,
-        total_packets*1448/1000000,
-        total_speed, 
-        drop_ratio, 
-        drop_count, 
-        total_packets
-    );
+    // println!( //LAST PRINT
+    //     "Total time of the benchmark : {}secs\
+    //     \nTotal bytes transfered : {}Mo\
+    //     \nTotal average speed : {} Ko/s\
+    //     \nTotal packet drop ratio : {}% ({} dropped count/{} total)", 
+    //     total_time,
+    //     total_packets*1448/1000000,
+    //     total_speed, 
+    //     drop_ratio, 
+    //     drop_count, 
+    //     total_packets
+    // );
     print_count_tcp.store(12, Ordering::SeqCst); //trigger the last print of the next thread (icmp_ping)
 }
 
@@ -197,7 +253,7 @@ fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: A
     let mut ping_number: i128 = 0;
     let mut partial_ping_number: i128 = 0;
 
-    let (pinger, results) = match Pinger::new(Some(500), Some(64)){ //init a pinger that will ping every 200ms a 64bytes packet
+    let (pinger, results) = match Pinger::new(Some(100), Some(64)){ //init a pinger that will ping every 200ms a 64bytes packet
         Ok((pinger, results)) => (pinger, results),
         Err(e) => panic!("Error creating pinger: {}", e), 
     };
@@ -207,7 +263,7 @@ fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: A
     pinger.run_pinger(); //launch the pinger
 
     while run_ping.load(Ordering::SeqCst) { // MAIN LOOP OF THE FCT running when atomic runner is true
-        match results.recv() {
+        match results.recv_timeout(Duration::from_millis(400)) {
             Ok(result) => match result {
                 Idle { addr: _ } => {
                     //println!("Ping out of time on: {}.", addr);
@@ -258,20 +314,23 @@ fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run_route: Arc<AtomicBo
             let packet = Icmpv4Packet { typ: 8, code: 0, checksum: 0, message: packetmsg}; // Build packet type 8 (echo request)
             let mut icmp_socket = IcmpSocket4::try_from(local_addr).unwrap();
             icmp_socket.set_max_hops(ttl_counter);
-
+            icmp_socket.set_timeout(Some(Duration::from_millis(300)));
+ 
             icmp_socket.send_to(dest_addr, packet).expect("Error while sending echo request");//sending echo request
 
-            let (_packet, src) = icmp_socket.rcv_from().unwrap();//listening for answer
-            
-            let sender_address = src.as_socket_ipv4().unwrap();//getting the adress from the answer
-
-            src_ip = IpAddr::V4(*sender_address.ip()); //extracting ip
-            addr_vec.push((ttl_counter, src_ip)); //pushing in stockage vector
+            match icmp_socket.rcv_from() { //listening for answer
+                Ok((_packet, src)) => {
+                    let sender_address = src.as_socket_ipv4().unwrap();//getting the adress from the answer
+                    src_ip = IpAddr::V4(*sender_address.ip()); //extracting ip
+                    addr_vec.push((ttl_counter, src_ip)); //pushing in stockage vector
+                }
+                Err(_) => {break}//break out of this loop if it fails during route establishment
+            }
         }
 
         while print_count_route.load(Ordering::SeqCst)!=3 {  // PERIODIC STAT PRINT WAITING triggered after the icmp_ping periodic print
             thread::sleep(Duration::from_millis(200));
-            if !run_route.load(Ordering::SeqCst) {breaker=true; break};
+            if !run_route.load(Ordering::SeqCst) {breaker=true; break}; //set breaker to true to break out of main loop and avoid double-prints
         }
         if breaker {break};
         src_ip= "0.0.0.0".parse().unwrap();
