@@ -26,14 +26,14 @@ ip2=`cat config.toml | grep "ip2" | cut -c7-14`
 ip3=`cat config.toml | grep "ip3" | cut -c7-14`
 ip4=`cat config.toml | grep "ip4" | cut -c7-16`
 
-# On choisit la machine SENDER
+# On choisit la machine locale
 while true
 do
-    echo "Vous allez choisir quelle machine est le SENDER"
-    echo "1 pour être le SENDER avec $ip1"
-    echo "2 pour être le SENDER avec $ip2"
-    echo "3 pour être le SENDER avec $ip3"
-    echo "4 pour être le SENDER avec $ip4"
+    echo "Vous allez choisir quelle machine est le local"
+    echo "1 pour être le local comme étant $ip1"
+    echo "2 pour être le local comme étant $ip2"
+    echo "3 pour être le local comme étant $ip3"
+    echo "4 pour être le local comme étant $ip4"
     echo "Q pour Quitter"
 
     read -p "Sélection : " selection
@@ -62,13 +62,13 @@ do
             ;;
     esac
 done
-echo "Vous choisissez d'être le SENDER $x avec l'adresse $ipS"
+echo "Vous choisissez d'être le local $x comme étant $ipS"
 # Validation de l'adresse IP
 while true; do
     read -p "Validez-vous cette sélection (O/N) ? " validate
     case $validate in
         [oO])
-            echo "Vous êtes le SENDER $x avec l'adresse IP $ipS"
+            echo "Vous êtes le local $x comme étant $ipS"
             break
             ;;
         [nN])
@@ -83,14 +83,14 @@ done
 # Changer dans le fichier config.toml le num_local
 sed -i "s/num_local= .*/num_local= $x/" config.toml
 
-# # On choisit la machine RECEIVER
+# # On choisit la machine distante
 while true
 do
-    echo "Vous allez choisir quelle machine est le RECEIVER"
-    echo "1 pour être le RECEIVER avec $ip1"
-    echo "2 pour être le RECEIVER avec $ip2"
-    echo "3 pour être le RECEIVER avec $ip3"
-    echo "4 pour être le RECEIVER avec $ip4"
+    echo "Vous allez choisir quelle machine est le distant"
+    echo "1 pour être le distant comme étant $ip1"
+    echo "2 pour être le distant comme étant $ip2"
+    echo "3 pour être le distant comme étant $ip3"
+    echo "4 pour être le distant comme étant $ip4"
     echo "Q pour Quitter"
 
     read -p "Sélection : " selection
@@ -119,13 +119,13 @@ do
             ;;
     esac
 done
-echo "Vous choisissez d'être le RECEIVER $y avec l'adresse $ipR"
+echo "Vous choisissez d'être le distant $y comme étant $ipR"
 # Validation de l'adresse IP
 while true; do
     read -p "Validez-vous cette sélection (O/N) ? " validate
     case $validate in
         [oO])
-            echo "Vous êtes le RECEIVER $y avec l'adresse IP $ipR"
+            echo "Vous êtes le distant $y comme étant $ipR"
             break
             ;;
         [nN])
@@ -143,7 +143,7 @@ sed -i "s/num_dist= .*/num_dist= $y/" config.toml
 # Message final
 echo " _______________________________________________________________"
 echo "| Tout est configuré"
-echo "|Le SENDER est $x avec l'adresse IP $ipS"
-echo "|Le RECEIVER est $y avec l'adresse IP $ipR"
+echo "|Le LOCAL est $x comme étant $ipS"
+echo "|Le DISTANT est $y comme étant $ipR"
 echo "|Il vous reste à lancer le fichier ./sender.sh ou ./receiver.sh"
 echo "|_______________________________________________________________"
