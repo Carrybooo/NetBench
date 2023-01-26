@@ -133,7 +133,8 @@ fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, port: u16, run_main: A
     
     while run_main.load(Ordering::SeqCst) { //MAIN LOOP OF THE THREAD running when the atomic runner bool is true
 
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(100));//délais entre chaque paquet
+
         let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
         let mut payload = BenchPayload::new(Sequence as u8); //new payload type 0 -> type Sequence (sets time automatically)
         payload.seq = sequence_number.clone(); //set sequence number field
@@ -149,37 +150,39 @@ fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, port: u16, run_main: A
         }
         
         if print_count_tcp.load(Ordering::SeqCst)==1 {           // PERIODIC STATS PRINT
-            ///UPDATE BLOC  
+            ///UPDATE BLOC
             let mut partial_count_received = false;
-            while !partial_count_received { //Loop until count is received
+            let mut timeout = Instant::now();
+            let mut breaker = false;
+            while !partial_count_received && !breaker { //Loop until count is received
                 let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
                 let mut payload = BenchPayload::new(UpdateCall as u8); //new payload type 2 -> type Updatecall
                 let serialized_payload = bincode::serialize(&payload).unwrap();
                 packet.set_payload(&serialized_payload.as_slice());
-        
                 match tx.send_to(packet, IpAddr::V4(dist_addr)){// Send UpdateCall
                     Ok(_)=>{
-                        match rcv_iterator.next_with_timeout(Duration::from_secs(3)) {
+                        match rcv_iterator.next_with_timeout(Duration::from_millis(150)) {
                             Ok(Some((rcv_packet,source))) => {
                                 if source == dist_addr{
                                     let rcv_payload : BenchPayload = bincode::deserialize(rcv_packet.payload()).unwrap();
                                     if rcv_payload.payload_type == (UpdateAnswer as u8){
-                                        let partial_receiver_count = rcv_payload.count.clone() as i128;
+                                        partial_receiver_count = rcv_payload.count.clone() as i128;
                                         partial_count_received = true;
-                                        println!("DEBUG, partialcount received : {}", partial_receiver_count);
+                                        //println!("DEBUG, partialcount received : {}", partial_receiver_count);
                                     }
                                 }
                             }
-                            Ok(None) => {println!("Timeout reached while iterating on receiver for UpdateCall answer")}
+                            Ok(None) => {}
                             Err(e) => {println!("Error while iterating on receiver for UpdateCall answer: {}", e)}
                         }
                     }
                     Err(e)=>{println!("Error while sending UpdateCall packet: {}", e)}
                 }
+                if timeout.elapsed().as_millis()>500{breaker=true}
             }//COUNT RECEIVED
-            println!("DEBUG, purging...");
+            //println!("DEBUG, purging...");
             purge_receiver(&mut rcv_iterator);
-            println!("DEBUG, purged");
+            //println!("DEBUG, purged");
             
         /// PRINTING BLOC
             let partial_time: u128 = partial_start.elapsed().as_millis();
@@ -204,52 +207,56 @@ fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, port: u16, run_main: A
     }
 
     let mut final_count_received = false;
-    while !final_count_received { //Loop until final count is received
+    let mut timeout = Instant::now();
+    let mut breaker = false;
+    while !final_count_received && !breaker { //Loop until final count is received
         let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
         let mut payload = BenchPayload::new(FinishCall as u8); //new payload type 4 -> type FinishCall
         payload.step = 0; //FIRST STEP OF THE FINISH CALL
         let serialized_payload = bincode::serialize(&payload).unwrap();
         packet.set_payload(&serialized_payload.as_slice());
-
         match tx.send_to(packet, IpAddr::V4(dist_addr)){// Send FinishCall
             Ok(_)=>{
-                match rcv_iterator.next_with_timeout(Duration::from_secs(3)) {
+                match rcv_iterator.next_with_timeout(Duration::from_secs(1)) {
                     Ok(Some((rcv_packet,source))) => {
                         if source == dist_addr{
                             let rcv_payload : BenchPayload = bincode::deserialize(rcv_packet.payload()).unwrap();
                             if rcv_payload.payload_type == (FinishAnswer as u8){
-                                let final_receiver_count = rcv_payload.count.clone() as i128;
+                                final_receiver_count = rcv_payload.count.clone() as i128;
                                 final_count_received = true;
-                                println!("DEBUG, finalreceivercount received : {}", final_receiver_count);
+                                //println!("DEBUG, finalreceivercount received : {}", final_receiver_count);
                             }
                         }
                     }
-                    Ok(None) => {println!("Timeout reached while iterating on receiver for FinishCall answer")}
-                    Err(e) => {println!("Error while iterating on receiver for FinishCall answer: {}", e)}
+                    Ok(None) => {println!("Timeout reached while waiting for FinishCall answer… Retrying.")}
+                    Err(e) => {println!("Error while waiting for FinishCall answer: {}", e)}
                 }
             }
             Err(e)=>{println!("Error while sending UpdateCall packet: {}", e)}
         }
+        if timeout.elapsed().as_millis() > 5000{breaker=true}
     }//COUNT RECEIVED
 
-    //when the count is received, acknowledge with an other FinishCall with STEP FIELD = 1 
-    //(init new packet but just update payload)
-    let mut receiver_stopped = false;
-    while !receiver_stopped{ //continue this loop until no response for 0.5 sec
-        let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
-        let mut payload = BenchPayload::new(FinishCall as u8); //new payload type 4 -> type FinishCall
-        payload.step = 1; //2nd step of the finish call : ack the total count reception
-        let serialized_payload = bincode::serialize(&payload).unwrap();
-        packet.set_payload(&serialized_payload.as_slice());
-        match tx.send_to(packet, IpAddr::V4(dist_addr)){
-            Ok(_)=>{println!("DEBUG, finishcall sent with payload.step=1");}
-            Err(e)=>{println!("Error while sending UpdateCall acknoledgement: {}", e)}
+    if !breaker{
+        //when the count is received, acknowledge with an other FinishCall with STEP FIELD = 1 
+        //(init new packet but just update payload)
+        let mut receiver_stopped = false;
+        while !receiver_stopped{ //continue this loop until no response for 0.5 sec
+            let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
+            let mut payload = BenchPayload::new(FinishCall as u8); //new payload type 4 -> type FinishCall
+            payload.step = 1; //2nd step of the finish call : ack the total count reception
+            let serialized_payload = bincode::serialize(&payload).unwrap();
+            packet.set_payload(&serialized_payload.as_slice());
+            match tx.send_to(packet, IpAddr::V4(dist_addr)){
+                Ok(_)=>{/*println!("DEBUG, finishcall sent with payload.step=1");*/}
+                Err(e)=>{println!("Error while sending UpdateCall acknoledgement: {}", e)}
+            }
+            match rcv_iterator.next_with_timeout(Duration::from_millis(100)) {
+                Err(e) => {println!("Error while purging the iterator after the finish call: {e}")},
+                Ok(None) => {receiver_stopped=true},
+                Ok(_) => {}
+            }        
         }
-        match rcv_iterator.next_with_timeout(Duration::from_millis(500)) {
-            Err(e) => {println!("Error while purging the iterator after the finish call: {e}")},
-            Ok(None) => {receiver_stopped=true},
-            Ok(_) => {}
-        }        
     }
 
     //PRINT THE BINARY RESULTING TREE
@@ -258,13 +265,12 @@ fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, port: u16, run_main: A
             println!("seq: {}, timestamp: {:?}", key, value);
         }
     } 
-
     let total_time: u128 = start.elapsed().as_millis();
     let total_speed: f64 = (total_packets as f64 * 1448f64 / 1000f64 / (total_time as f64/1000f64)).round();
     let total_delivery_ratio: f64 = ((final_receiver_count as f64 / total_packets as f64)*100.0).round();
     println!( //LAST PRINT
-        "Partial average speed : {}Ko/s\
-        \nPartial packet delivery ratio : {}% ({} delivered / {} total)", 
+        "Total average speed : {}Ko/s\
+        \nTotal packet delivery ratio : {}% ({} delivered / {} total)",
         total_speed, 
         total_delivery_ratio, 
         final_receiver_count, 
@@ -286,7 +292,6 @@ fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: A
         Ok((pinger, results)) => (pinger, results),
         Err(e) => panic!("Error creating pinger: {}", e), 
     };
-
     pinger.add_ipaddr(dist_addr.to_string().as_str()); 
 
     pinger.run_pinger(); //launch the pinger
@@ -298,7 +303,7 @@ fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: A
                     //println!("Ping out of time on: {}.", addr);
                 }
                 Receive { addr:_, rtt } => { //Compute the average (and partial) data at each new ping
-                    println!("debugPING: rtt (nanos) = {}",rtt.as_nanos());
+                    //println!("debugPING: rtt (nanos) = {}",rtt.as_nanos());
                     average_rtt = ((ping_number*average_rtt)+rtt.as_millis()as i128)/(ping_number+1);
                     partial_average_rtt = ((partial_ping_number*partial_average_rtt)+rtt.as_millis()as i128)/(partial_ping_number+1);
                     ping_number += 1;
@@ -308,7 +313,7 @@ fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: A
             Err(_) => panic!("Worker threads disconnected before the solution was found!"),
         }
         
-        if print_count_ping.load(Ordering::SeqCst)==2 {      // PERIODIC STAT PRINT triggered after the main_thread periodic print
+        if print_count_ping.load(Ordering::SeqCst)==2 {   // PERIODIC STAT PRINT triggered after the main_thread periodic print
             println!("Partial average RTT: {}ms on {} pings", partial_average_rtt, partial_ping_number);
             partial_average_rtt=0;
             partial_ping_number=0;
@@ -373,6 +378,6 @@ fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run_route: Arc<AtomicBo
     while print_count_route.load(Ordering::SeqCst)!=13 {
         thread::sleep(Duration::from_millis(100));
     }
-    println!("Route to Dist addr : {:?}", final_vec);//Last print, printing the last route used
+    println!("Last route to Dist addr : {:?}", final_vec);//Last print, printing the last route used
     print_count_route.store(1000, Ordering::SeqCst);
 }
