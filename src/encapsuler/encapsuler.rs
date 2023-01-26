@@ -1,6 +1,7 @@
 use pnet::packet::{ipv4::MutableIpv4Packet, ip::IpNextHeaderProtocol};
+use pnet::transport::Ipv4TransportChannelIterator;
 use serde_derive::{Deserialize, Serialize};
-use std::time::SystemTime;
+use std::time::{SystemTime, Duration};
 use std::net::Ipv4Addr;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -56,4 +57,16 @@ pub fn init_ipv4_packet(mut packet: MutableIpv4Packet, local_addr: Ipv4Addr, dis
     packet.set_next_level_protocol(IpNextHeaderProtocol::new(254u8)); //we don't use any known protocole
     packet.set_total_length(1024);
     return packet;
+}
+
+pub fn purge_receiver(rcv_iterator: &mut Ipv4TransportChannelIterator){
+    let mut purged = false;
+    while !purged{
+        match rcv_iterator.next_with_timeout(Duration::from_millis(100)) {
+            Err(e) => {println!("Error while purging the receive_iterator {e}")},
+            Ok(None) => {purged=true},
+            Ok(_) => {},
+            
+        }
+    }
 }
