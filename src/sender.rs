@@ -67,7 +67,7 @@ fn main() {
     }).unwrap();
 
     let main_thread: thread::JoinHandle<()> = thread::Builder::new().name("main_thread".to_string()).spawn(move || {
-        main_thread(local_addr, dist_addr, config.tcp_port, run_main, print_count_tcp);
+        main_thread(local_addr, dist_addr, run_main, print_count_tcp);
     }).unwrap();
 
     let icmp_ping: thread::JoinHandle<()> = thread::Builder::new().name("ICMP_ping_thread".to_string()).spawn(move || {
@@ -114,7 +114,7 @@ fn sync(run_print: Arc<AtomicBool>, print_count_sync: Arc<AtomicU16>){
 
 //********************************************************************************************************************************
 // Fonction main thread --- used to measure average throughput and packet delivery/loss ratio.
-fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, port: u16, run_main: Arc<AtomicBool>, print_count_tcp: Arc<AtomicU16>){
+fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run_main: Arc<AtomicBool>, print_count_tcp: Arc<AtomicU16>){
     
     let mut total_packets: i128 = 0;
     let mut partial_total_packets: i128 = 0;

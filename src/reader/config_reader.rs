@@ -18,7 +18,6 @@ pub struct Config {
     pub ip2: String,
     pub ip3: String,
     pub ip4: String,
-    pub tcp_port: u16,
 }
 
 pub fn read_config(filename: &str) -> Config {
@@ -48,7 +47,6 @@ pub fn read_config(filename: &str) -> Config {
     println!("ip2: {}", data.config.ip2); 
     println!("ip3: {}", data.config.ip3); 
     println!("ip4: {}", data.config.ip4); 
-    println!("tcp_port: {}", data.config.tcp_port); 
 
 
     return Config{
@@ -58,6 +56,5 @@ pub fn read_config(filename: &str) -> Config {
         ip2: data.config.ip2,
         ip3: data.config.ip3,
         ip4: data.config.ip4,
-        tcp_port: data.config.tcp_port,
     };
 }

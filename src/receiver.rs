@@ -66,7 +66,11 @@ fn main() {
 
                             //Detect and print drops
                             if (last_rcv_seq + 1) < payload.seq {
-                                println!("The following packets have never been received : [{}..{}].", last_rcv_seq+1, payload.seq-1);
+                                if (last_rcv_seq + 1) == (payload.seq -1){
+                                    println!("The following packet has never been received : {}", last_rcv_seq+1);
+                                }else{
+                                    println!("The following packets have never been received : [{}..{}]", last_rcv_seq+1, payload.seq-1);
+                                }
                             };
                             last_rcv_seq = payload.seq.clone();
                         },
@@ -130,7 +134,7 @@ fn main() {
         }
     }
 
-    //TODO when terminated !!!
+    //TODO when terminating !!!
     for i in 0..packet_map.len(){
         if let Some((key, value)) = packet_map.pop_first(){
             println!("seq: {}, timestamp: {:?}", key, value);
@@ -138,48 +142,3 @@ fn main() {
     }
 
 }
-
-
-// fn handle_connection(mut stream: TcpStream) {
-//     let mut received_packets: u64 = 0;
-//     let mut partial_packets: u64 = 0;
-//     let peer_addr = stream.peer_addr().unwrap().to_string();
-//     println!("Connection started by this remote address: {}", peer_addr);
-//     let mut buf: [u8; 1448] = [0; 1448];
-
-
-    
-
-
-//     loop{
-//         let partial_time: Instant = Instant::now();
-
-//         match stream.read(&mut buf){
-//             Err(_) => {}
-//             Ok(bytes_read) => {
-//                 received_packets += 1;
-//                 partial_packets += 1;
-//                 if bytes_read == 0 {
-//                     println!("Connection closed with this address: {}", peer_addr);
-//                     break;
-//                 }
-//                 let copy = buf.clone();
-//                 let received_data = String::from_utf8_lossy(&copy);
-                
-//                 if received_data.trim_matches('\0').starts_with("finishcall") && partial_packets != 1 && partial_time.elapsed()>Duration::from_secs(1){
-//                     println!("finish call received, sending total count: {}", received_packets);
-//                     stream.write(received_packets.to_string().as_bytes()).expect("Error while sending final count of received packets");
-//                     stream.flush().unwrap();
-//                     break;
-//                 }
-//                 if received_data.trim_matches('\0').starts_with("updatecall") && partial_packets != 1 && partial_time.elapsed()>Duration::from_secs(1){
-//                     println!("update call received, sending count: {}", partial_packets);
-//                     stream.write(partial_packets.to_string().as_bytes()).expect("Error while sending final count of received packets");
-//                     stream.flush().unwrap();
-//                     partial_packets = 0;
-//                     buf = [0; 1448];
-//                 }}
-//         }
-        
-//     }
-// }
