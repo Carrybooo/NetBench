@@ -1,19 +1,16 @@
-#![allow(unused)]
+//#![allow(unused)]
 
 mod reader;
 mod encapsuler;
 use crate::reader::config_reader::{Config,read_config};
 use crate::encapsuler::encapsuler::{PayloadType::*, BenchPayload, init_ipv4_packet, purge_receiver};
 
-use serde::{Serialize, Deserialize};
 use bincode;
 
-use arrayvec::ArrayVec;
-use toml::from_str;
 use std::env;
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
 use std::process::exit;
+use std::sync::atomic::AtomicU64;
 use std::time::{Instant, Duration, SystemTime};
 
 use std::thread;
@@ -21,26 +18,26 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering, AtomicU16}};
 
 use fastping_rs::{Pinger, PingResult::{Idle, Receive}};
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr};
 
 use icmp_socket::{IcmpSocket, IcmpSocket4, Icmpv4Packet, Icmpv4Message};
 
 use pnet::packet::Packet;
-use pnet::packet::ip::{IpNextHeaderProtocols, IpNextHeaderProtocol};
-use pnet::packet::ipv4::{Ipv4Packet, Ipv4, MutableIpv4Packet, checksum};
-use pnet::transport::{transport_channel, TransportReceiver, Ipv4TransportChannelIterator, ipv4_packet_iter};
+use pnet::packet::ip::{IpNextHeaderProtocol};
+use pnet::packet::ipv4::{MutableIpv4Packet};
+use pnet::transport::{transport_channel, ipv4_packet_iter};
 use pnet::transport::TransportChannelType::Layer3;
 
 fn main() {
     let args: Vec<String> = env::args().collect();//Collect given arguments
-    let control_delay = 100;
+    let mut control_delay = 100;
     if args.len() > 1{
         println!("env args : {:?}", args);
         let throughput : u64 = args[1].parse::<u64>().expect(format!(
             "Incorrect argument value: {:?}. Expected integer, representing desired throughput, in Kio/s",args[1]
             ).as_str());
 
-        let control_delay = throughput_calcul(throughput, 1); //compute the delay assuming packet size = 1kiB right now
+        control_delay = throughput_calcul(throughput, 1); //compute the delay assuming packet size = 1kiB right now
         println!("control_delay will be : {}", control_delay);
     }
     
@@ -64,14 +61,20 @@ fn main() {
     //init atomic variables, which are used to access data accross threads
     let atomic_runner:Arc<AtomicBool> = Arc::new(AtomicBool::new(true));//runner
     let run_sync:Arc<AtomicBool> = atomic_runner.clone();//clones for each thread
-    let run_main:Arc<AtomicBool> = atomic_runner.clone();
+    let run_sender:Arc<AtomicBool> = atomic_runner.clone();
+    let run_compute:Arc<AtomicBool> = atomic_runner.clone();
     let run_ping:Arc<AtomicBool> = atomic_runner.clone();
     let run_route:Arc<AtomicBool> = atomic_runner.clone();
     let atomic_print_counter:Arc<AtomicU16> = Arc::new(AtomicU16::new(0));//print-sync
     let print_count_sync:Arc<AtomicU16> = atomic_print_counter.clone();//clones for each thread
-    let print_count_tcp:Arc<AtomicU16> = atomic_print_counter.clone();
+    let print_count_sender:Arc<AtomicU16> = atomic_print_counter.clone();
+    let print_count_compute:Arc<AtomicU16> = atomic_print_counter.clone();
     let print_count_ping:Arc<AtomicU16> = atomic_print_counter.clone();
     let print_count_route:Arc<AtomicU16> = atomic_print_counter.clone();
+
+    let global_count:Arc<AtomicU64> = Arc::new(AtomicU64::new(0));//global packet number counter
+    let global_count_sender: Arc<AtomicU64> = global_count.clone();
+    let global_count_compute: Arc<AtomicU64> = global_count.clone();
     
     //Launch the threads
     let sync: thread::JoinHandle<()> = thread::Builder::new().name("sync_thread".to_string()).spawn(move || {
@@ -79,7 +82,11 @@ fn main() {
     }).unwrap();
 
     let sender_thread: thread::JoinHandle<()> = thread::Builder::new().name("sender_thread".to_string()).spawn(move || {
-        sender_thread(local_addr, dist_addr, control_delay, run_main, print_count_tcp);
+        sender_thread(local_addr, dist_addr, control_delay, run_sender, print_count_sender, global_count_sender);
+    }).unwrap();
+
+    let compute_thread: thread::JoinHandle<()> = thread::Builder::new().name("compute_thread".to_string()).spawn(move || {
+        compute_thread(local_addr, dist_addr, run_compute, print_count_compute, global_count_compute);
     }).unwrap();
 
     let icmp_ping: thread::JoinHandle<()> = thread::Builder::new().name("ICMP_ping_thread".to_string()).spawn(move || {
@@ -99,90 +106,118 @@ fn main() {
     
     //wait for every thread to finish
     sync.join().expect("Erreur lors de la fermeture du thread sync_thread");
-    sender_thread.join().expect("Erreur lors de la fermeture du thread sender_thread");
+    sender_thread.join().expect("Erreur lors de la fermeture du thread send_thread");
+    compute_thread.join().expect("Erreur lors de la fermeture du thread compute_thread");
     icmp_ping.join().expect("Erreur lors de la fermeture du thread ICMP_ping_thread");
     icmp_route.join().expect("Erreur lors de la fermeture du thread ICMP_route_thread");
+    println!("=================================================================");
 }
 
 
 //********************************************************************************************************************************
 // Function used to sychronise all syncs to have them print periodicly stats in the same time
-fn sync(run_print: Arc<AtomicBool>, print_count_sync: Arc<AtomicU16>){
+fn sync(run: Arc<AtomicBool>, print_count_sync: Arc<AtomicU16>){
     let mut time: Instant = Instant::now();
-    while run_print.load(Ordering::SeqCst) {//while the atomic runner bool is true, trigger a print every 3sec (starting by tcp_thread)
+    while run.load(Ordering::SeqCst) {//while the atomic runner bool is true, trigger a print every 3sec (starting by compute_thread)
         if time.elapsed().as_millis()>3000 && print_count_sync.load(Ordering::SeqCst)==0 {
             println!("\n\n\n\n");
             print_count_sync.store(1, Ordering::SeqCst);
             time = Instant::now();
         }
     }
-    if print_count_sync.load(Ordering::SeqCst) == 0 {//when the atomic runner bool switches to false, trigger the final print
-        print_count_sync.store(11, Ordering::SeqCst);
+
+    while print_count_sync.load(Ordering::SeqCst) != 0 {//when the atomic runner bool switches to false, trigger the final print
+        //Start by sending it to the sender thread to be sure he has stopped before printing results
+        thread::sleep(Duration::from_millis(10));
     }
+    print_count_sync.store(100, Ordering::SeqCst);
 }
 
-
-
-
 //********************************************************************************************************************************
-/// Fonction main thread --- used to measure average throughput and packet delivery/loss ratio.
-fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128, run_main: Arc<AtomicBool>, print_count_tcp: Arc<AtomicU16>){
-    
-    let mut total_packets: i128 = 0;
-    let mut partial_total_packets: i128 = 0;
-    let mut final_receiver_count: i128 = 0;
-    let mut partial_receiver_count: i128 = 0;
-    let start: Instant = Instant::now();
-    let mut partial_start: Instant = Instant::now();
-    let mut control_delay: Instant = Instant::now();
-    let mut packet_map: BTreeMap<u64, (SystemTime)> = BTreeMap::new();
-
-    let (mut tx, mut rx) = transport_channel(4096, Layer3(IpNextHeaderProtocol::new(254))).expect("Error while creating transport channel");
-    let mut rcv_iterator = ipv4_packet_iter(&mut rx);
-
-    let mut sequence_number = 0u64;
+/// Fonction sender thread --- used to measure average throughput and packet delivery/loss ratio.
+fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128, run: Arc<AtomicBool>, print_count_sender: Arc<AtomicU16>, global_count: Arc<AtomicU64>){
+    let (mut tx, _) = transport_channel(4096, Layer3(IpNextHeaderProtocol::new(254))).expect("Error while creating transport channel");
+    let mut total_packets = 0;
     let mut packet_buffer = [0u8; 1024];
-    
-    while run_main.load(Ordering::SeqCst) { //MAIN LOOP OF THE THREAD running when the atomic runner bool is true
-        while(control_delay.elapsed().as_nanos()<expected_delay){
-            thread::sleep(Duration::from_nanos(100))
+    let mut sequence_number = 0u64;
+    let mut packet_map: BTreeMap<u64, SystemTime> = BTreeMap::new();
+    let mut control_delay = Instant::now();
+    while run.load(Ordering::SeqCst){
+        while control_delay.elapsed().as_micros() < expected_delay{
+            thread::sleep(Duration::from_micros(100));
         }
         control_delay=Instant::now();
-
         let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
         let mut payload = BenchPayload::new(Sequence as u8); //new payload type 0 -> type Sequence (sets time automatically)
         payload.seq = sequence_number.clone(); //set sequence number field
         let serialized_payload = bincode::serialize(&payload).unwrap();
         packet.set_payload(&serialized_payload.as_slice());
-
+        
         match tx.send_to(packet, IpAddr::V4(dist_addr)){
             Ok(_)=>{
-                total_packets += 1; partial_total_packets += 1; sequence_number += 1; //increment all variables
+                total_packets += 1; sequence_number += 1; //increment all variables
+                global_count.store(total_packets, Ordering::SeqCst);
                 packet_map.insert(payload.seq, payload.time); //insert the sent packet to the binaryTree map
             }
             Err(e)=>{println!("Error while sending Sequence packet: {}", e)}
         }
-        
-        if print_count_tcp.load(Ordering::SeqCst)==1 {           // PERIODIC STATS PRINT
-            ///UPDATE BLOC
+    }//fin main while 
+
+    while print_count_sender.load(Ordering::SeqCst) != 100 {
+        thread::sleep(Duration::from_millis(100));
+    }
+    print_count_sender.store(11, Ordering::SeqCst);
+
+    
+    //PRINT THE BINARY RESULTING TREE
+    /*
+    for _ in 0..packet_map.len(){
+        if let Some((key, value)) = packet_map.pop_first(){
+            println!("seq: {}, timestamp: {:?}", key, value);
+        }
+    } 
+    */
+}
+
+//********************************************************************************************************************************
+/// Fonction main thread --- used to measure average throughput and packet delivery/loss ratio.
+fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run: Arc<AtomicBool>, print_count_compute: Arc<AtomicU16>, global_count: Arc<AtomicU64>){
+    
+    let mut total_packets: i128 = 0;
+    let mut partial_total_packets: i128;
+    let mut partial_total_marker: i128 = 0;
+    let mut final_receiver_count: i128 = 0;
+    let mut partial_receiver_count: i128 = 0;
+    let start: Instant = Instant::now();
+    let mut partial_start: Instant = Instant::now();
+
+    let (mut tx, mut rx) = transport_channel(4096, Layer3(IpNextHeaderProtocol::new(254))).expect("Error while creating transport channel");
+    let mut rcv_iterator = ipv4_packet_iter(&mut rx);
+
+    let mut packet_buffer = [0u8; 1024];
+    
+    while run.load(Ordering::SeqCst) { //MAIN LOOP OF THE THREAD running when the atomic runner bool is true
+        if print_count_compute.load(Ordering::SeqCst)==1 {           // PERIODIC STATS PRINT
+            //UPDATE BLOC
             let mut partial_count_received = false;
-            let mut timeout = Instant::now();
+            let timeout = Instant::now();
             let mut breaker = false;
             while !partial_count_received && !breaker { //Loop until count is received
                 let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
-                let mut payload = BenchPayload::new(UpdateCall as u8); //new payload type 2 -> type Updatecall
+                let payload = BenchPayload::new(UpdateCall as u8); //new payload type 2 -> type Updatecall
                 let serialized_payload = bincode::serialize(&payload).unwrap();
                 packet.set_payload(&serialized_payload.as_slice());
                 match tx.send_to(packet, IpAddr::V4(dist_addr)){// Send UpdateCall
                     Ok(_)=>{
-                        match rcv_iterator.next_with_timeout(Duration::from_millis(150)) {
+                        
+                        match rcv_iterator.next_with_timeout(Duration::from_millis(100)) {
                             Ok(Some((rcv_packet,source))) => {
+                                total_packets = global_count.load(Ordering::SeqCst) as i128;//get send count here to avoid huge shifts compared to receiver count
                                 if source == dist_addr{
                                     let rcv_payload : BenchPayload = bincode::deserialize(rcv_packet.payload()).unwrap();
                                     if rcv_payload.payload_type == (UpdateAnswer as u8){
-                                        partial_receiver_count = rcv_payload.count.clone() as i128;
+                                        partial_receiver_count = rcv_payload.count.clone() as i128; 
                                         partial_count_received = true;
-                                        //println!("DEBUG, partialcount received : {}", partial_receiver_count);
                                     }
                                 }
                             }
@@ -194,11 +229,12 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
                 }
                 if timeout.elapsed().as_millis()>500{breaker=true}
             }//COUNT RECEIVED
-            //println!("DEBUG, purging...");
             purge_receiver(&mut rcv_iterator);
-            //println!("DEBUG, purged");
-            
-        /// PRINTING BLOC
+
+            // PRINTING BLOC
+            //TOTAL packet number is retrieved at the same time the script receives the receiver count to minimize the difference
+            partial_total_packets = total_packets-partial_total_marker;
+            partial_total_marker = total_packets.clone();
             let partial_time: u128 = partial_start.elapsed().as_millis();
             let partial_speed: f64 = (partial_receiver_count as f64 * 1024f64 / 1000f64 / (partial_time as f64/1000f64)).round();
             let partial_delivery_ratio: f64 = ((partial_receiver_count as f64 / partial_total_packets as f64)*100.0).round();
@@ -210,18 +246,17 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
                 partial_receiver_count, 
                 partial_total_packets
             );
-            partial_total_packets = 0;
             partial_start = Instant::now();
-            print_count_tcp.store(2, Ordering::SeqCst); //trigger the print of the next thread (icmp_ping)
+            print_count_compute.store(2, Ordering::SeqCst); //trigger the print of the next thread (icmp_ping)
         }
     }//MAIN LOOP END
 
-    while print_count_tcp.load(Ordering::SeqCst)!=11 {    //waiting for LAST PRINT BEFORE CLOSING, triggered by sync_thread
-        thread::sleep(Duration::from_millis(100));
+    while print_count_compute.load(Ordering::SeqCst)!=11 {    //waiting for LAST PRINT BEFORE CLOSING, triggered by sync_thread
+        thread::sleep(Duration::from_millis(10));
     }
 
     let mut final_count_received = false;
-    let mut timeout = Instant::now();
+    let timeout = Instant::now();
     let mut breaker = false;
     while !final_count_received && !breaker { //Loop until final count is received
         let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
@@ -231,24 +266,27 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
         packet.set_payload(&serialized_payload.as_slice());
         match tx.send_to(packet, IpAddr::V4(dist_addr)){// Send FinishCall
             Ok(_)=>{
-                match rcv_iterator.next_with_timeout(Duration::from_secs(1)) {
+                match rcv_iterator.next_with_timeout(Duration::from_millis(100)) {
                     Ok(Some((rcv_packet,source))) => {
+                        total_packets = global_count.load(Ordering::SeqCst) as i128;//getting total packets before receiving it to avoid huge shifts
                         if source == dist_addr{
                             let rcv_payload : BenchPayload = bincode::deserialize(rcv_packet.payload()).unwrap();
                             if rcv_payload.payload_type == (FinishAnswer as u8){
                                 final_receiver_count = rcv_payload.count.clone() as i128;
                                 final_count_received = true;
-                                //println!("DEBUG, finalreceivercount received : {}", final_receiver_count);
                             }
                         }
                     }
-                    Ok(None) => {println!("Timeout reached while waiting for FinishCall answer… Retrying.")}
+                    Ok(None) => {}//println!("Timeout reached while waiting for FinishCall answer… Retrying.")}
                     Err(e) => {println!("Error while waiting for FinishCall answer: {}", e)}
                 }
             }
             Err(e)=>{println!("Error while sending UpdateCall packet: {}", e)}
         }
-        if timeout.elapsed().as_millis() > 5000{breaker=true}
+        if timeout.elapsed().as_millis() > 2000{
+            println!("Impossible to retrieve final packet count. Termitating without it");
+            breaker=true
+        }
     }//COUNT RECEIVED
 
     if !breaker{
@@ -262,7 +300,7 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
             let serialized_payload = bincode::serialize(&payload).unwrap();
             packet.set_payload(&serialized_payload.as_slice());
             match tx.send_to(packet, IpAddr::V4(dist_addr)){
-                Ok(_)=>{/*println!("DEBUG, finishcall sent with payload.step=1");*/}
+                Ok(_)=>{}
                 Err(e)=>{println!("Error while sending UpdateCall acknoledgement: {}", e)}
             }
             match rcv_iterator.next_with_timeout(Duration::from_millis(100)) {
@@ -273,12 +311,7 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
         }
     }
 
-    //PRINT THE BINARY RESULTING TREE
-    for i in 0..packet_map.len(){
-        if let Some((key, value)) = packet_map.pop_first(){
-            println!("seq: {}, timestamp: {:?}", key, value);
-        }
-    } 
+    //TOTAL packet number is retrieved at the same time the script receives the receiver count to minimize the difference
     let total_time: u128 = start.elapsed().as_millis();
     let total_speed: f64 = (final_receiver_count as f64 * 1024f64 / 1000f64 / (total_time as f64/1000f64)).round();
     let total_delivery_ratio: f64 = ((final_receiver_count as f64 / total_packets as f64)*100.0).round();
@@ -292,13 +325,13 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
         final_receiver_count, 
         total_packets
     );
-    print_count_tcp.store(12, Ordering::SeqCst); //trigger the last print of the next thread (icmp_ping)
+    print_count_compute.store(12, Ordering::SeqCst); //trigger the last print of the next thread (icmp_ping)
 }
 
 
 //********************************************************************************************************************************
 /// Fonction ICMP ping, used to measure average ping to a distant address.
-fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: Arc<AtomicU16>){
+fn icmp_ping(dist_addr: Ipv4Addr, run: Arc<AtomicBool>, print_count_ping: Arc<AtomicU16>){
     let mut average_rtt: i128 = 0;
     let mut partial_average_rtt: i128 = 0;
     let mut ping_number: i128 = 0;
@@ -312,14 +345,13 @@ fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: A
 
     pinger.run_pinger(); //launch the pinger
 
-    while run_ping.load(Ordering::SeqCst) { // MAIN LOOP OF THE FCT running when atomic runner is true
+    while run.load(Ordering::SeqCst) { // MAIN LOOP OF THE FCT running when atomic runner is true
         match results.recv_timeout(Duration::from_millis(400)) {
             Ok(result) => match result {
                 Idle { addr: _ } => {
                     //println!("Ping out of time on: {}.", addr);
                 }
                 Receive { addr:_, rtt } => { //Compute the average (and partial) data at each new ping
-                    //println!("debugPING: rtt (nanos) = {}",rtt.as_nanos());
                     average_rtt = ((ping_number*average_rtt)+rtt.as_millis()as i128)/(ping_number+1);
                     partial_average_rtt = ((partial_ping_number*partial_average_rtt)+rtt.as_millis()as i128)/(partial_ping_number+1);
                     ping_number += 1;
@@ -329,7 +361,7 @@ fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: A
             Err(_) => {}, //ping timeout -> not critical…
         }
         
-        if print_count_ping.load(Ordering::SeqCst)==2 {   // PERIODIC STAT PRINT triggered after the sender_thread periodic print
+        if print_count_ping.load(Ordering::SeqCst)==2 {   // PERIODIC STAT PRINT triggered after the compute_thread periodic print
             println!("Partial average RTT: {}ms on {} pings", partial_average_rtt, partial_ping_number);
             partial_average_rtt=0;
             partial_ping_number=0;
@@ -337,7 +369,7 @@ fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: A
         }    
     }
     while print_count_ping.load(Ordering::SeqCst)!=12 {    //waiting for LAST PRINT BEFORE CLOSING
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(10));
     }
     println!("Total average RTT: {}ms on {} pings", average_rtt, ping_number);
     print_count_ping.store(13, Ordering::SeqCst);
@@ -348,7 +380,7 @@ fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: A
 
 //********************************************************************************************************************************
 /// Fonction ICMP route, used to discover the current route to a distant address.
-fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run_route: Arc<AtomicBool>, print_count_route: Arc<AtomicU16>) {
+fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run: Arc<AtomicBool>, print_count_route: Arc<AtomicU16>) {
     let mut sequence_counter: u16 = 0;
     let mut ttl_counter: u32 = 0;
     let mut src_ip: IpAddr= "0.0.0.0".parse().unwrap();
@@ -356,7 +388,7 @@ fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run_route: Arc<AtomicBo
     let mut final_vec: Vec<(u32, IpAddr)> = Vec::new();
     let mut breaker = false;
     
-    while run_route.load(Ordering::SeqCst){ // MAIN LOOP OF THE FCT running when atomic runner is true
+    while run.load(Ordering::SeqCst){ // MAIN LOOP OF THE FCT running when atomic runner is true
         while src_ip != IpAddr::V4(dest_addr){ // loop to find the route (which is when the ICMP answer comes from the target address)
             ttl_counter += 1;
             sequence_counter += 1;
@@ -380,8 +412,8 @@ fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run_route: Arc<AtomicBo
         }
 
         while print_count_route.load(Ordering::SeqCst)!=3 {  // PERIODIC STAT PRINT WAITING triggered after the icmp_ping periodic print
-            thread::sleep(Duration::from_millis(200));
-            if !run_route.load(Ordering::SeqCst) {breaker=true; break}; //set breaker to true to break out of main loop and avoid double-prints
+            thread::sleep(Duration::from_millis(10));
+            if !run.load(Ordering::SeqCst) {breaker=true; break}; //set breaker to true to break out of main loop and avoid double-prints
         }
         if breaker {break};
         src_ip= "0.0.0.0".parse().unwrap();
@@ -392,7 +424,7 @@ fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run_route: Arc<AtomicBo
         print_count_route.store(0, Ordering::SeqCst);
     }
     while print_count_route.load(Ordering::SeqCst)!=13 {
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(10));
     }
     println!("Last route to Dist addr : {:?}", final_vec);//Last print, printing the last route used
     print_count_route.store(1000, Ordering::SeqCst);
@@ -400,7 +432,7 @@ fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run_route: Arc<AtomicBo
 
 
 //-----------------Local util functions-------------------//
-///compute the delay between 2 packets to achieve a desired throughput for a specific packet size. (all in KiB).
+///compute the delay needed between 2 packets to achieve a desired throughput for a specific packet size. (all in KiB).
 fn throughput_calcul(throughput: u64, size: u64) -> u128{ 
-    (1000000/size/throughput) as u128 //return the needed delay for 1 packet the delay in nanosecond.
+    (1000000/size/throughput) as u128 //return the needed delay for 1 packet the delay in microsecond.
 }

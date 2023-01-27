@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use pnet::packet::{ipv4::MutableIpv4Packet, ip::IpNextHeaderProtocol};
 use pnet::transport::Ipv4TransportChannelIterator;
 use serde_derive::{Deserialize, Serialize};
