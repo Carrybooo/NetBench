@@ -9,6 +9,8 @@ use serde::{Serialize, Deserialize};
 use bincode;
 
 use arrayvec::ArrayVec;
+use toml::from_str;
+use std::env;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::process::exit;
@@ -29,8 +31,18 @@ use pnet::packet::ipv4::{Ipv4Packet, Ipv4, MutableIpv4Packet, checksum};
 use pnet::transport::{transport_channel, TransportReceiver, Ipv4TransportChannelIterator, ipv4_packet_iter};
 use pnet::transport::TransportChannelType::Layer3;
 
-
 fn main() {
+    let args: Vec<String> = env::args().collect();//Collect given arguments
+    let control_delay = 100;
+    if args.len() > 1{
+        println!("env args : {:?}", args);
+        let throughput : u64 = args[1].parse::<u64>().expect(format!(
+            "Incorrect argument value: {:?}. Expected integer, representing desired throughput, in Kio/s",args[1]
+            ).as_str());
+
+        let control_delay = throughput_calcul(throughput, 1); //compute the delay assuming packet size = 1kiB right now
+        println!("control_delay will be : {}", control_delay);
+    }
     
     //read config and retrieve data
     let config : Config = read_config("./config.toml");
@@ -66,8 +78,8 @@ fn main() {
         sync(run_sync, print_count_sync);
     }).unwrap();
 
-    let main_thread: thread::JoinHandle<()> = thread::Builder::new().name("main_thread".to_string()).spawn(move || {
-        main_thread(local_addr, dist_addr, run_main, print_count_tcp);
+    let sender_thread: thread::JoinHandle<()> = thread::Builder::new().name("sender_thread".to_string()).spawn(move || {
+        sender_thread(local_addr, dist_addr, control_delay, run_main, print_count_tcp);
     }).unwrap();
 
     let icmp_ping: thread::JoinHandle<()> = thread::Builder::new().name("ICMP_ping_thread".to_string()).spawn(move || {
@@ -87,7 +99,7 @@ fn main() {
     
     //wait for every thread to finish
     sync.join().expect("Erreur lors de la fermeture du thread sync_thread");
-    main_thread.join().expect("Erreur lors de la fermeture du thread main_thread");
+    sender_thread.join().expect("Erreur lors de la fermeture du thread sender_thread");
     icmp_ping.join().expect("Erreur lors de la fermeture du thread ICMP_ping_thread");
     icmp_route.join().expect("Erreur lors de la fermeture du thread ICMP_route_thread");
 }
@@ -113,8 +125,8 @@ fn sync(run_print: Arc<AtomicBool>, print_count_sync: Arc<AtomicU16>){
 
 
 //********************************************************************************************************************************
-// Fonction main thread --- used to measure average throughput and packet delivery/loss ratio.
-fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run_main: Arc<AtomicBool>, print_count_tcp: Arc<AtomicU16>){
+/// Fonction main thread --- used to measure average throughput and packet delivery/loss ratio.
+fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128, run_main: Arc<AtomicBool>, print_count_tcp: Arc<AtomicU16>){
     
     let mut total_packets: i128 = 0;
     let mut partial_total_packets: i128 = 0;
@@ -122,7 +134,7 @@ fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run_main: Arc<AtomicBo
     let mut partial_receiver_count: i128 = 0;
     let start: Instant = Instant::now();
     let mut partial_start: Instant = Instant::now();
-
+    let mut control_delay: Instant = Instant::now();
     let mut packet_map: BTreeMap<u64, (SystemTime)> = BTreeMap::new();
 
     let (mut tx, mut rx) = transport_channel(4096, Layer3(IpNextHeaderProtocol::new(254))).expect("Error while creating transport channel");
@@ -132,8 +144,10 @@ fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run_main: Arc<AtomicBo
     let mut packet_buffer = [0u8; 1024];
     
     while run_main.load(Ordering::SeqCst) { //MAIN LOOP OF THE THREAD running when the atomic runner bool is true
-
-        thread::sleep(Duration::from_millis(100));//délais entre chaque paquet
+        while(control_delay.elapsed().as_nanos()<expected_delay){
+            thread::sleep(Duration::from_nanos(100))
+        }
+        control_delay=Instant::now();
 
         let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
         let mut payload = BenchPayload::new(Sequence as u8); //new payload type 0 -> type Sequence (sets time automatically)
@@ -186,10 +200,10 @@ fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run_main: Arc<AtomicBo
             
         /// PRINTING BLOC
             let partial_time: u128 = partial_start.elapsed().as_millis();
-            let partial_speed: f64 = (partial_total_packets as f64 * 1448f64 / 1000f64 / (partial_time as f64/1000f64)).round();
+            let partial_speed: f64 = (partial_receiver_count as f64 * 1024f64 / 1000f64 / (partial_time as f64/1000f64)).round();
             let partial_delivery_ratio: f64 = ((partial_receiver_count as f64 / partial_total_packets as f64)*100.0).round();
             println!( //PARTIAL PRINT
-                "Partial average speed : {}Ko/s\
+                "Partial average speed : {}Kio/s\
                 \nPartial packet delivery ratio : {}% ({} delivered / {} total)", 
                 partial_speed, 
                 partial_delivery_ratio, 
@@ -266,11 +280,13 @@ fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run_main: Arc<AtomicBo
         }
     } 
     let total_time: u128 = start.elapsed().as_millis();
-    let total_speed: f64 = (total_packets as f64 * 1448f64 / 1000f64 / (total_time as f64/1000f64)).round();
+    let total_speed: f64 = (final_receiver_count as f64 * 1024f64 / 1000f64 / (total_time as f64/1000f64)).round();
     let total_delivery_ratio: f64 = ((final_receiver_count as f64 / total_packets as f64)*100.0).round();
     println!( //LAST PRINT
-        "Total average speed : {}Ko/s\
+        "Benchmark lasted for : {}s\
+        \nTotal average speed : {}Kio/s\
         \nTotal packet delivery ratio : {}% ({} delivered / {} total)",
+        total_time/1000,
         total_speed, 
         total_delivery_ratio, 
         final_receiver_count, 
@@ -281,7 +297,7 @@ fn main_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run_main: Arc<AtomicBo
 
 
 //********************************************************************************************************************************
-// Fonction ICMP ping, used to measure average ping to a distant address.
+/// Fonction ICMP ping, used to measure average ping to a distant address.
 fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: Arc<AtomicU16>){
     let mut average_rtt: i128 = 0;
     let mut partial_average_rtt: i128 = 0;
@@ -313,7 +329,7 @@ fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: A
             Err(_) => {}, //ping timeout -> not critical…
         }
         
-        if print_count_ping.load(Ordering::SeqCst)==2 {   // PERIODIC STAT PRINT triggered after the main_thread periodic print
+        if print_count_ping.load(Ordering::SeqCst)==2 {   // PERIODIC STAT PRINT triggered after the sender_thread periodic print
             println!("Partial average RTT: {}ms on {} pings", partial_average_rtt, partial_ping_number);
             partial_average_rtt=0;
             partial_ping_number=0;
@@ -331,7 +347,7 @@ fn icmp_ping(dist_addr: Ipv4Addr, run_ping: Arc<AtomicBool>, print_count_ping: A
 
 
 //********************************************************************************************************************************
-// Fonction ICMP route, used to discover the current route to a distant address.
+/// Fonction ICMP route, used to discover the current route to a distant address.
 fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run_route: Arc<AtomicBool>, print_count_route: Arc<AtomicU16>) {
     let mut sequence_counter: u16 = 0;
     let mut ttl_counter: u32 = 0;
@@ -380,4 +396,11 @@ fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run_route: Arc<AtomicBo
     }
     println!("Last route to Dist addr : {:?}", final_vec);//Last print, printing the last route used
     print_count_route.store(1000, Ordering::SeqCst);
+}
+
+
+//-----------------Local util functions-------------------//
+///compute the delay between 2 packets to achieve a desired throughput for a specific packet size. (all in KiB).
+fn throughput_calcul(throughput: u64, size: u64) -> u128{ 
+    (1000000/size/throughput) as u128 //return the needed delay for 1 packet the delay in nanosecond.
 }

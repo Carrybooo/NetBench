@@ -48,9 +48,12 @@ fn main() {
     let mut call_ack = false;
     let mut terminate = false;
     let mut packet_map: BTreeMap<u64, (SystemTime)> = BTreeMap::new();
+    let mut rcv_time = SystemTime::now();
+
     while !terminate{
         match rcv_iterator.next() {
             Ok((packet,source)) => {
+                rcv_time = SystemTime::now();
                 if source == dist_addr{
                     let payload: BenchPayload = bincode::deserialize(packet.payload()).unwrap();
 
@@ -62,7 +65,7 @@ fn main() {
                             }
                             total_packets += 1;
                             partial_packets += 1;
-                            packet_map.insert(payload.seq, payload.time);
+                            packet_map.insert(payload.seq, rcv_time);
 
                             //Detect and print drops
                             if (last_rcv_seq + 1) < payload.seq {
