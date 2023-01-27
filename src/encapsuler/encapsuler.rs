@@ -17,7 +17,6 @@ pub struct BenchPayload {
     pub step: u8,
     pub count: u64,
     pub time: SystemTime,
-    pub filler: [[u8; 32]; 29], //trying to fill with anything else than 0 but can serialyze array > 32 so it's approximative for the moment
 }
 
 impl BenchPayload {
@@ -28,7 +27,6 @@ impl BenchPayload {
             step: 0,
             count: 0,
             time: SystemTime::now(),
-            filler: [[170u8; 32]; 29],
         };
     }
 }

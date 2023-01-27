@@ -30,17 +30,25 @@ use pnet::transport::TransportChannelType::Layer3;
 
 fn main() {
     let args: Vec<String> = env::args().collect();//Collect given arguments
-    let mut control_delay = 100;
+    let mut control_delay = 1000000;
+    let mut packet_size = 1024u16;
+
     if args.len() > 1{
+        packet_size = args[1].parse::<u16>().expect(format!(
+            "Incorrect argument value: {:?}. Expected integer, representing desired throughput, in Kio/s",args[1]
+            ).as_str());
+    }
+    if args.len() > 2{
         println!("env args : {:?}", args);
-        let throughput : u64 = args[1].parse::<u64>().expect(format!(
+        let throughput : u64 = args[2].parse::<u64>().expect(format!(
             "Incorrect argument value: {:?}. Expected integer, representing desired throughput, in Kio/s",args[1]
             ).as_str());
 
-        control_delay = throughput_calcul(throughput, 1); //compute the delay assuming packet size = 1kiB right now
+        control_delay = throughput_calcul(throughput, packet_size); //compute the delay assuming packet size = 1kiB right now
         println!("control_delay will be : {}", control_delay);
     }
     
+    //const PACKETSIZE: u16 = args[1];
     //read config and retrieve data
     let config : Config = read_config("./config.toml");
     let dist_addr: Ipv4Addr = match config.num_dist{
@@ -82,11 +90,11 @@ fn main() {
     }).unwrap();
 
     let sender_thread: thread::JoinHandle<()> = thread::Builder::new().name("sender_thread".to_string()).spawn(move || {
-        sender_thread(local_addr, dist_addr, control_delay, run_sender, print_count_sender, global_count_sender);
+        sender_thread(local_addr, dist_addr, control_delay, packet_size, run_sender, print_count_sender, global_count_sender);
     }).unwrap();
 
     let compute_thread: thread::JoinHandle<()> = thread::Builder::new().name("compute_thread".to_string()).spawn(move || {
-        compute_thread(local_addr, dist_addr, run_compute, print_count_compute, global_count_compute);
+        compute_thread(local_addr, dist_addr, packet_size, run_compute, print_count_compute, global_count_compute);
     }).unwrap();
 
     let icmp_ping: thread::JoinHandle<()> = thread::Builder::new().name("ICMP_ping_thread".to_string()).spawn(move || {
@@ -135,10 +143,13 @@ fn sync(run: Arc<AtomicBool>, print_count_sync: Arc<AtomicU16>){
 
 //********************************************************************************************************************************
 /// Fonction sender thread --- used to measure average throughput and packet delivery/loss ratio.
-fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128, run: Arc<AtomicBool>, print_count_sender: Arc<AtomicU16>, global_count: Arc<AtomicU64>){
+fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128, packet_size: u16, run: Arc<AtomicBool>, print_count_sender: Arc<AtomicU16>, global_count: Arc<AtomicU64>){
     let (mut tx, _) = transport_channel(4096, Layer3(IpNextHeaderProtocol::new(254))).expect("Error while creating transport channel");
     let mut total_packets = 0;
-    let mut packet_buffer = [0u8; 1024];
+    let mut packet_example: Vec<u8> = Vec::new();
+        for _ in 0..packet_size {
+            packet_example.push(0); //INIT THE FUTURE WRITE BUFFER WITH FULL RANDOM VALUES (here packet size will be 1448 Bytes so 64kiB)
+        }
     let mut sequence_number = 0u64;
     let mut packet_map: BTreeMap<u64, Duration> = BTreeMap::new();
     let mut control_delay = Instant::now();
@@ -149,17 +160,21 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
             thread::sleep(Duration::from_micros(100));
         }
         control_delay=Instant::now();
+        let mut packet_buffer = packet_example.clone();
         let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
         let mut payload = BenchPayload::new(Sequence as u8); //new payload type 0 -> type Sequence (sets time automatically)
         payload.seq = sequence_number.clone(); //set sequence number field
         let serialized_payload = bincode::serialize(&payload).unwrap();
         packet.set_payload(&serialized_payload.as_slice());
-        
+        packet.set_total_length(packet_size);
+
+
         match tx.send_to(packet, IpAddr::V4(dist_addr)){
-            Ok(_)=>{
+            Ok(bytes)=>{
                 total_packets += 1; sequence_number += 1; //increment all variables
                 global_count.store(total_packets, Ordering::SeqCst);
                 packet_map.insert(payload.seq, payload.time.duration_since(start_time).ok().unwrap()); //insert the sent packet to the binaryTree map
+                println!("bytes envoyés : {}, total_packets : {}", bytes, global_count.load(Ordering::SeqCst));
             }
             Err(e)=>{println!("Error while sending Sequence packet: {}", e)}
         }
@@ -187,7 +202,7 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
 
 //********************************************************************************************************************************
 /// Fonction main thread --- used to measure average throughput and packet delivery/loss ratio.
-fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run: Arc<AtomicBool>, print_count_compute: Arc<AtomicU16>, global_count: Arc<AtomicU64>){
+fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, packet_size: u16, run: Arc<AtomicBool>, print_count_compute: Arc<AtomicU16>, global_count: Arc<AtomicU64>){
     
     let mut total_packets: i128 = 0;
     let mut partial_total_packets: i128;
@@ -200,8 +215,11 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run: Arc<AtomicBool
     let (mut tx, mut rx) = transport_channel(4096, Layer3(IpNextHeaderProtocol::new(254))).expect("Error while creating transport channel");
     let mut rcv_iterator = ipv4_packet_iter(&mut rx);
 
-    let mut packet_buffer = [0u8; 1024];
-    
+    let mut packet_example: Vec<u8> = Vec::new();
+    for _ in 0..packet_size {
+        packet_example.push(rand::random()); //INIT THE FUTURE WRITE BUFFER WITH FULL RANDOM VALUES (here packet size will be 1448 Bytes so 64kiB)
+    }
+
     while run.load(Ordering::SeqCst) { //MAIN LOOP OF THE THREAD running when the atomic runner bool is true
         if print_count_compute.load(Ordering::SeqCst)==1 {           // PERIODIC STATS PRINT
             //UPDATE BLOC
@@ -209,13 +227,13 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run: Arc<AtomicBool
             let timeout = Instant::now();
             let mut breaker = false;
             while !partial_count_received && !breaker { //Loop until count is received
+                let mut packet_buffer = packet_example.clone();
                 let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
                 let payload = BenchPayload::new(UpdateCall as u8); //new payload type 2 -> type Updatecall
                 let serialized_payload = bincode::serialize(&payload).unwrap();
                 packet.set_payload(&serialized_payload.as_slice());
                 match tx.send_to(packet, IpAddr::V4(dist_addr)){// Send UpdateCall
                     Ok(_)=>{
-                        
                         match rcv_iterator.next_with_timeout(Duration::from_millis(100)) {
                             Ok(Some((rcv_packet,source))) => {
                                 total_packets = global_count.load(Ordering::SeqCst) as i128;//get send count here to avoid huge shifts compared to receiver count
@@ -238,11 +256,13 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run: Arc<AtomicBool
             purge_receiver(&mut rcv_iterator);
 
             // PRINTING BLOC
-            //TOTAL packet number is retrieved at the same time the script receives the receiver count to minimize the difference
+            //TOTAL packet number is retrieved at the same time the script receives the receiver's count to minimize the difference
+            //but if we didn't receive the receiver's count, get the value manually
+            if total_packets == 0 {total_packets = global_count.load(Ordering::SeqCst) as i128}
             partial_total_packets = total_packets-partial_total_marker;
             partial_total_marker = total_packets.clone();
             let partial_time: u128 = partial_start.elapsed().as_millis();
-            let partial_speed: f64 = (partial_receiver_count as f64 * 1024f64 / 1000f64 / (partial_time as f64/1000f64)).round();
+            let partial_speed: f64 = (partial_receiver_count as f64 * (packet_size as f64) / 1000f64 / (partial_time as f64/1000f64)).round();
             let partial_delivery_ratio: f64 = ((partial_receiver_count as f64 / partial_total_packets as f64)*100.0).round();
             println!( //PARTIAL PRINT
                 "Partial average speed : {}Kio/s\
@@ -265,6 +285,7 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run: Arc<AtomicBool
     let timeout = Instant::now();
     let mut breaker = false;
     while !final_count_received && !breaker { //Loop until final count is received
+        let mut packet_buffer = packet_example.clone();
         let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
         let mut payload = BenchPayload::new(FinishCall as u8); //new payload type 4 -> type FinishCall
         payload.step = 0; //FIRST STEP OF THE FINISH CALL
@@ -300,6 +321,7 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run: Arc<AtomicBool
         //(init new packet but just update payload)
         let mut receiver_stopped = false;
         while !receiver_stopped{ //continue this loop until no response for 0.5 sec
+            let mut packet_buffer = packet_example.clone();
             let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
             let mut payload = BenchPayload::new(FinishCall as u8); //new payload type 4 -> type FinishCall
             payload.step = 1; //2nd step of the finish call : ack the total count reception
@@ -318,8 +340,10 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, run: Arc<AtomicBool
     }
 
     //TOTAL packet number is retrieved at the same time the script receives the receiver count to minimize the difference
+    //but if we didn't receive the receiver's count, get the value manually
+    if total_packets == 0 {total_packets = global_count.load(Ordering::SeqCst) as i128}
     let total_time: u128 = start.elapsed().as_millis();
-    let total_speed: f64 = (final_receiver_count as f64 * 1024f64 / 1000f64 / (total_time as f64/1000f64)).round();
+    let total_speed: f64 = (final_receiver_count as f64 * (packet_size as f64) / 1000f64 / (total_time as f64/1000f64)).round();
     let total_delivery_ratio: f64 = ((final_receiver_count as f64 / total_packets as f64)*100.0).round();
     println!( //LAST PRINT
         "Benchmark lasted for : {}s\
@@ -421,13 +445,16 @@ fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run: Arc<AtomicBool>, p
             thread::sleep(Duration::from_millis(10));
             if !run.load(Ordering::SeqCst) {breaker=true; break}; //set breaker to true to break out of main loop and avoid double-prints
         }
-        if breaker {break};
+        if !breaker {
         src_ip= "0.0.0.0".parse().unwrap();
         println!("Route to Dist addr : {:?}", addr_vec);// printing stockage vector when the route has been found
         final_vec = addr_vec.clone();
         addr_vec.clear();
         ttl_counter = 0;
-        print_count_route.store(0, Ordering::SeqCst);
+        };
+        if print_count_route.load(Ordering::SeqCst) == 3 {
+            print_count_route.store(0, Ordering::SeqCst);
+        }
     }
     while print_count_route.load(Ordering::SeqCst)!=13 {
         thread::sleep(Duration::from_millis(10));
@@ -439,6 +466,6 @@ fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run: Arc<AtomicBool>, p
 
 //-----------------Local util functions-------------------//
 ///compute the delay needed between 2 packets to achieve a desired throughput for a specific packet size. (all in KiB).
-fn throughput_calcul(throughput: u64, size: u64) -> u128{ 
-    (1000000/size/throughput) as u128 //return the needed delay for 1 packet the delay in microsecond.
+fn throughput_calcul(throughput: u64, size: u16) -> u128{ 
+    (1000000/(size as u64)/throughput) as u128 //return the needed delay for 1 packet the delay in microsecond.
 }
