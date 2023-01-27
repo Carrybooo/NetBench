@@ -30,6 +30,7 @@ use pnet::transport::TransportChannelType::Layer3;
 
 fn main() {
     let args: Vec<String> = env::args().collect();//Collect given arguments
+
     let mut control_delay = 1000000;
     let mut packet_size = 1024u16;
 
@@ -44,7 +45,7 @@ fn main() {
             "Incorrect argument value: {:?}. Expected integer, representing desired throughput, in Kio/s",args[1]
             ).as_str());
 
-        control_delay = throughput_calcul(throughput, packet_size); //compute the delay assuming packet size = 1kiB right now
+        control_delay = throughput_calcul(throughput, packet_size); //throughput in Kio, packet size in bytes 
         println!("control_delay will be : {}", control_delay);
     }
     
@@ -170,11 +171,11 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
 
 
         match tx.send_to(packet, IpAddr::V4(dist_addr)){
-            Ok(bytes)=>{
+            Ok(_bytes)=>{
                 total_packets += 1; sequence_number += 1; //increment all variables
                 global_count.store(total_packets, Ordering::SeqCst);
                 packet_map.insert(payload.seq, payload.time.duration_since(start_time).ok().unwrap()); //insert the sent packet to the binaryTree map
-                println!("bytes envoyés : {}, total_packets : {}", bytes, global_count.load(Ordering::SeqCst));
+                //println!("bytes envoyés : {}, total_packets : {}", bytes, global_count.load(Ordering::SeqCst));
             }
             Err(e)=>{println!("Error while sending Sequence packet: {}", e)}
         }
@@ -217,7 +218,7 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, packet_size: u16, r
 
     let mut packet_example: Vec<u8> = Vec::new();
     for _ in 0..packet_size {
-        packet_example.push(rand::random()); //INIT THE FUTURE WRITE BUFFER WITH FULL RANDOM VALUES (here packet size will be 1448 Bytes so 64kiB)
+        packet_example.push(0); //INIT THE FUTURE WRITE BUFFER WITH FULL RANDOM VALUES (here packet size will be 1448 Bytes so 64kiB)
     }
 
     while run.load(Ordering::SeqCst) { //MAIN LOOP OF THE THREAD running when the atomic runner bool is true
@@ -467,5 +468,5 @@ fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run: Arc<AtomicBool>, p
 //-----------------Local util functions-------------------//
 ///compute the delay needed between 2 packets to achieve a desired throughput for a specific packet size. (all in KiB).
 fn throughput_calcul(throughput: u64, size: u16) -> u128{ 
-    (1000000/(size as u64)/throughput) as u128 //return the needed delay for 1 packet the delay in microsecond.
+    (1000000/(size as u64)/1024/throughput) as u128 //return the needed delay for 1 packet the delay in microsecond.
 }
