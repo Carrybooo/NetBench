@@ -1,25 +1,20 @@
-#![allow(unused)]
+//#![allow(unused)]
 
 mod reader;
 mod encapsuler;
 use crate::reader::config_reader::{Config,read_config};
-use crate::encapsuler::encapsuler::{BenchPayload, init_ipv4_packet};
+use crate::encapsuler::encapsuler::{BenchPayload, init_ipv4_packet, dump_to_csv};
 use crate::encapsuler::encapsuler::PayloadType::*;
 
-use serde::{Serialize, Deserialize};
-use bincode::*;
-
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
-use std::process::exit;
-use std::time::{Instant, Duration, SystemTime};
+use std::time::{SystemTime, Duration};
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr};
 
 use pnet::packet::Packet;
-use pnet::packet::ip::{IpNextHeaderProtocols, IpNextHeaderProtocol};
-use pnet::packet::ipv4::{Ipv4Packet, Ipv4, MutableIpv4Packet, checksum};
-use pnet::transport::{transport_channel, TransportReceiver, ipv4_packet_iter};
+use pnet::packet::ip::IpNextHeaderProtocol;
+use pnet::packet::ipv4::MutableIpv4Packet;
+use pnet::transport::{transport_channel, ipv4_packet_iter};
 use pnet::transport::TransportChannelType::Layer3;
 
 fn main() {
@@ -47,25 +42,26 @@ fn main() {
     let mut last_rcv_seq: u64 = 0;
     let mut call_ack = false;
     let mut terminate = false;
-    let mut packet_map: BTreeMap<u64, (SystemTime)> = BTreeMap::new();
-    let mut rcv_time = SystemTime::now();
-
+    let mut packet_map: BTreeMap<u64, Duration> = BTreeMap::new();
+    let mut rcv_time : SystemTime;
+    let mut start_time = SystemTime::now();
     while !terminate{
         match rcv_iterator.next() {
             Ok((packet,source)) => {
+                if total_packets==0{start_time = SystemTime::now();}
                 rcv_time = SystemTime::now();
                 if source == dist_addr{
                     let payload: BenchPayload = bincode::deserialize(packet.payload()).unwrap();
-
                     match payload.payload_type{
                         0 => { // SEQUENCE PAYLOAD
                             if !call_ack{ //Si un précédent call n'a pas encore été acquitté
                                 call_ack = true;
                                 partial_packets = 0;
                             }
+                            
                             total_packets += 1;
                             partial_packets += 1;
-                            packet_map.insert(payload.seq, rcv_time);
+                            packet_map.insert(payload.seq, rcv_time.duration_since(start_time).ok().unwrap());
 
                             //Detect and print drops
                             if (last_rcv_seq + 1) < payload.seq {
@@ -137,11 +133,16 @@ fn main() {
         }
     }
 
-    //TODO when terminating !!!
+    //Data print 
+    /*
     for i in 0..packet_map.len(){
         if let Some((key, value)) = packet_map.pop_first(){
             println!("seq: {}, timestamp: {:?}", key, value);
         }
     }
-
+    */
+    match dump_to_csv("rcvr",packet_map){
+        Ok(path) => {println!("Results dumped to file : {}", path)}
+        Err(e) => {println!("Error while writing data to CSV file: {}", e)}
+    }
 }

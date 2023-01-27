@@ -3,7 +3,7 @@
 mod reader;
 mod encapsuler;
 use crate::reader::config_reader::{Config,read_config};
-use crate::encapsuler::encapsuler::{PayloadType::*, BenchPayload, init_ipv4_packet, purge_receiver};
+use crate::encapsuler::encapsuler::{PayloadType::*, BenchPayload, init_ipv4_packet, purge_receiver, dump_to_csv};
 
 use bincode;
 
@@ -140,8 +140,10 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
     let mut total_packets = 0;
     let mut packet_buffer = [0u8; 1024];
     let mut sequence_number = 0u64;
-    let mut packet_map: BTreeMap<u64, SystemTime> = BTreeMap::new();
+    let mut packet_map: BTreeMap<u64, Duration> = BTreeMap::new();
     let mut control_delay = Instant::now();
+    let start_time = SystemTime::now();
+
     while run.load(Ordering::SeqCst){
         while control_delay.elapsed().as_micros() < expected_delay{
             thread::sleep(Duration::from_micros(100));
@@ -157,7 +159,7 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
             Ok(_)=>{
                 total_packets += 1; sequence_number += 1; //increment all variables
                 global_count.store(total_packets, Ordering::SeqCst);
-                packet_map.insert(payload.seq, payload.time); //insert the sent packet to the binaryTree map
+                packet_map.insert(payload.seq, payload.time.duration_since(start_time).ok().unwrap()); //insert the sent packet to the binaryTree map
             }
             Err(e)=>{println!("Error while sending Sequence packet: {}", e)}
         }
@@ -168,7 +170,11 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
     }
     print_count_sender.store(11, Ordering::SeqCst);
 
-    
+    match dump_to_csv("sender",packet_map){
+        Ok(path) => {println!("Results dumped to file : {}", path)}
+        Err(e) => {println!("Error while writing data to CSV file: {}", e)}
+    }
+
     //PRINT THE BINARY RESULTING TREE
     /*
     for _ in 0..packet_map.len(){

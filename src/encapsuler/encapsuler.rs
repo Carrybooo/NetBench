@@ -3,8 +3,12 @@
 use pnet::packet::{ipv4::MutableIpv4Packet, ip::IpNextHeaderProtocol};
 use pnet::transport::Ipv4TransportChannelIterator;
 use serde_derive::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::error::Error;
 use std::time::{SystemTime, Duration};
 use std::net::Ipv4Addr;
+use chrono::offset::Local;
+use csv;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BenchPayload {
@@ -32,9 +36,9 @@ impl BenchPayload {
 // /* Payload types : (I'll implement a real enum if I have the time but it's awful to serialize and deserialize properly from byte array:)
 // 0 : Sequence --- Numbered packet.
 // 1 : Clock --- used for synchro (pas encore trouvé comment)
-// 2 : UpdateCall --- 
+// 2 : UpdateCall ---
 // 3 : UpdateAnswer --- Contains partial count
-// 4 : FinishCall --- 
+// 4 : FinishCall ---
 // 5 : FinishAnswer --- Contains final count
 // */
 #[repr(u8)]
@@ -44,7 +48,7 @@ pub enum PayloadType {
     UpdateCall = 2,
     UpdateAnswer = 3,
     FinishCall = 4,
-    FinishAnswer = 5,  
+    FinishAnswer = 5,
 }
 
 
@@ -68,7 +72,23 @@ pub fn purge_receiver(rcv_iterator: &mut Ipv4TransportChannelIterator){
             Err(e) => {println!("Error while purging the receive_iterator {e}")},
             Ok(None) => {purged=true},
             Ok(_) => {},
-            
+
         }
     }
+}
+
+pub fn dump_to_csv(type_of: &str, map: BTreeMap<u64, Duration>) -> Result<String, Box<dyn Error>> {
+    let path=format!("./data/{}_{}.csv",type_of,Local::now().time());
+    let res = path.clone();
+
+    let mut writer = csv::Writer::from_path(path)?;
+
+    for (seq, time) in map.iter(){
+        writer.write_record(&[seq.to_string(),time.as_micros().to_string()])?;
+    }
+
+
+    writer.flush()?;
+
+    Ok(res.to_string())
 }
