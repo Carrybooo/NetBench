@@ -27,8 +27,9 @@ use pnet::transport::TransportChannelType::Layer3;
 fn main() {
     let args: Vec<String> = env::args().collect();//Collect given arguments
 
-    let mut control_delay = 10000; //10K microsecs = 0,01sec base delay per packet
+    let control_delay: u128; //10K microsecs = 0,01sec base delay per packet
     let mut packet_size = 1024u16; //size of the packets, in bytes
+    let mut throughput = 100f64; //throughput in KiB/s
 
     if args.len() > 1{
         //println!("env args : {:?}", args);
@@ -39,16 +40,18 @@ fn main() {
             panic!("Error, the packet size must be between 100 and 1500 bytes,\
             \nas this script doesn't handle fragmentation for now.");
         }
-        println!("Packet size : {}", packet_size);
-    }
+        println!("Packet size : {} Bytes", packet_size);
+    }else{println!("No packet size specified, using default size: {} Bytes", packet_size);}
+
     if args.len() > 2{
-        let throughput = args[2].parse::<f64>().expect(format!(
+        throughput = args[2].parse::<f64>().expect(format!(
             "Incorrect argument value: {:?}. Expected integer, representing desired throughput, in Kio/s",args[1]
             ).as_str());
-        println!("Expected throughput : {}", throughput);
-        control_delay = throughput_calcul(throughput*1024f64, packet_size as f64); //throughput in KiB/s, packet size in bytes
-        println!("control_delay will be : {} nano seconds", control_delay);
-    }
+            println!("Expected throughput : {}", throughput);
+    }else{println!("No expected throughput specified, using default throughput : {}", throughput);}
+    control_delay = throughput_calcul(throughput*1024f64, packet_size as f64); //throughput in KiB/s, packet size in bytes
+    println!("control_delay will be : {} nano seconds between each sent packet", control_delay);
+
     
     //const PACKETSIZE: u16 = args[1];
     //read config and retrieve data
