@@ -8,13 +8,19 @@ Cette partie du projet est un outil de benchmark que nous avons développé pour
 - X Les variations de latence (pas fait encore)
 - La route utilisée par les paquets
 
+Il peut pour l’instant prendre 2 paramètres en entrée : 
+- La taille du paquet en octets (compris entre 64 et 1500 octets, cela comprend le header)
+- Le débit souhaité en kilo-octets.
+
 Cet outil comporte plusieurs parties : 
 
-- Un reader qui a pour but d'aller lire un fichier de config (nommé config.toml) et de le parser pour récupérer les adresses et ports nécessaires au benchmark.
+Un fichier utils contenant plusieurs petits modules:
+- Un reader qui a pour but d'aller lire un fichier de config (nommé config.toml) et de le parser pour récupérer les adresses nécessaires au benchmark.
+- Plusieurs structures ayant pour but de mettre en place un protocole rudimentaire par dessus IP en utilisant des payloads de différentes sortes.
+- Des fonctions auxiliaires comme un dumper, appelé à la fin de l’exécution du sender et du receiver, pour écrire des données dans un fichier CSV dans le dossier data, ou encore une fonction permettant de purger l’itérateur d’un canal de réception.
 
-- Un dumper qui va écrire dans le dossier ```data``` un fichier CSV comprenant des infos sur les paquets envoyés/reçus pendant l'utilisation du script.
 
-- Un receiver ayant pour tâche d'ouvrir un socket TCP et de compter les paquets reçus et de pouvoir renvoyer périodiquement ce nombre.
+- Un receiver ayant pour tâche de scanner les paquets IP entrants, de vérifier qu'ils viennet bien du sender, de les compter, les stocker dans un arbre binaire, et de pouvoir renvoyer périodiquement leur nombre et enfin d'appeler le dumper pour stocker les données dans un fichier à la fin de son exécution.
 
 - Un sender, qui s'occupe d'envoyer les paquets et de faire les mesures. l'exécution de ce dernier est divisée en 5 threads :
   
