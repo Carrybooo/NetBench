@@ -320,7 +320,7 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, packet_size: u16, r
             }
             Err(e)=>{println!("Error while sending UpdateCall packet: {}", e)}
         }
-        if timeout.elapsed().as_millis() > 2000{
+        if timeout.elapsed().as_millis() > 5000{
             println!("Impossible to retrieve final packet count. Termitating without it");
             breaker=true
         }
