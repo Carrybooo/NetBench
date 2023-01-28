@@ -1,12 +1,8 @@
-//#![allow(unused)]
-
-mod reader;
-mod encapsuler;
-use crate::reader::config_reader::{Config,read_config};
-use crate::encapsuler::encapsuler::{BenchPayload, init_ipv4_packet, dump_to_csv};
-use crate::encapsuler::encapsuler::PayloadType::*;
+mod utils;
+use crate::utils::utils::{{BenchPayload, init_ipv4_packet, dump_to_csv, Config, read_config},PayloadType::*};
 
 use std::collections::BTreeMap;
+use std::process::exit;
 use std::time::{SystemTime, Duration};
 
 use std::net::{IpAddr, Ipv4Addr};
@@ -20,18 +16,20 @@ use pnet::transport::TransportChannelType::Layer3;
 fn main() {
     let config : Config = read_config("./config.toml");
     let dist_addr: Ipv4Addr = match config.num_dist{
+        0 => {println!("Config Error : PC number for dist_adrr is set to 0. Maybe consider using the ./config script."); exit(1)}
         1 => config.ip1.parse().unwrap(),
         2 => config.ip2.parse().unwrap(),
         3 => config.ip3.parse().unwrap(),
         4 => config.ip4.parse().unwrap(),
-        _ => {panic!("Config Error :\nUnrecognized PC number :\"{}\", unable to continue.", config.num_dist)},
+        _ => {println!("Config Error :\nUnrecognized PC number :\"{}\", unable to continue.", config.num_dist); exit(1)},
     };
     let local_addr: Ipv4Addr = match config.num_local{
+        0 => {println!("Config Error : PC number for local_adrr is set to 0. Maybe consider using the ./config script."); exit(1)}
         1 => config.ip1.parse().unwrap(),
         2 => config.ip2.parse().unwrap(),
         3 => config.ip3.parse().unwrap(),
         4 => config.ip4.parse().unwrap(),
-        _ => {panic!("Config Error :\nUnrecognized PC number :\"{}\", unable to continue.", config.num_local)},
+        _ => {println!("Config Error :\nUnrecognized PC number :\"{}\", unable to continue.", config.num_local); exit(1)},
     };
     
 
@@ -42,7 +40,7 @@ fn main() {
     let mut last_rcv_seq: u64 = 0;
     let mut call_ack = false;
     let mut terminate = false;
-    let mut packet_map: BTreeMap<u64, Duration> = BTreeMap::new();
+    let mut packet_map: BTreeMap<u64, (Duration, u16)> = BTreeMap::new();
     let mut rcv_time : SystemTime;
     let mut start_time = SystemTime::now();
     while !terminate{
@@ -61,7 +59,7 @@ fn main() {
                             
                             total_packets += 1;
                             partial_packets += 1;
-                            packet_map.insert(payload.seq, rcv_time.duration_since(start_time).ok().unwrap());
+                            packet_map.insert(payload.seq, (rcv_time.duration_since(start_time).ok().unwrap(), packet.get_total_length()));
 
                             //Detect and print drops
                             if (last_rcv_seq + 1) < payload.seq {
@@ -81,7 +79,7 @@ fn main() {
                             let mut packet_buffer = [0u8; 1024];
                             let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr, 200); //initialize a new packet
                             let mut packet_payload = BenchPayload::new(UpdateAnswer as u8); //new payload type 3 -> type UpdateAnswer  
-                            packet_payload.count = partial_packets.clone();
+                            packet_payload.data = partial_packets.clone();
                             let serialized_payload = bincode::serialize(&packet_payload).unwrap();
                             packet.set_payload(&serialized_payload.as_slice());
                             match tx.send_to(packet, IpAddr::V4(dist_addr)){
@@ -98,7 +96,7 @@ fn main() {
                             while !call_ack{
                                 let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr, 200); //initialize a new packet
                                 let mut packet_payload = BenchPayload::new(FinishAnswer as u8); //new payload type 5 -> type FinishAnswer  
-                                packet_payload.count = total_packets.clone();
+                                packet_payload.data = total_packets.clone();
                                 let serialized_payload = bincode::serialize(&packet_payload).unwrap();
                                 packet.set_payload(&serialized_payload.as_slice());
                                 match tx.send_to(packet, IpAddr::V4(dist_addr)){

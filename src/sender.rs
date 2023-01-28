@@ -1,9 +1,5 @@
-//#![allow(unused)]
-
-mod reader;
-mod encapsuler;
-use crate::reader::config_reader::{Config,read_config};
-use crate::encapsuler::encapsuler::{PayloadType::*, BenchPayload, init_ipv4_packet, purge_receiver, dump_to_csv};
+mod utils;
+use crate::utils::utils::{{BenchPayload, init_ipv4_packet, dump_to_csv, purge_receiver, Config, read_config},PayloadType::*};
 
 use bincode;
 
@@ -31,14 +27,18 @@ use pnet::transport::TransportChannelType::Layer3;
 fn main() {
     let args: Vec<String> = env::args().collect();//Collect given arguments
 
-    let mut control_delay = 10000; //1M microsecs = 1sec base delay per packet
+    let mut control_delay = 10000; //10K microsecs = 0,01sec base delay per packet
     let mut packet_size = 1024u16; //size of the packets, in bytes
 
     if args.len() > 1{
-        println!("env args : {:?}", args);
+        //println!("env args : {:?}", args);
         packet_size = args[1].parse::<u16>().expect(format!(
             "Incorrect argument value: {:?}. Expected integer, representing desired throughput, in Kio/s",args[1]
             ).as_str());
+        if packet_size < 100 || packet_size > 1500 {
+            panic!("Error, the packet size must be between 100 and 1500 bytes,\
+            \nas this script doesn't handle fragmentation for now.");
+        }
         println!("Packet size : {}", packet_size);
     }
     if args.len() > 2{
@@ -46,7 +46,7 @@ fn main() {
             "Incorrect argument value: {:?}. Expected integer, representing desired throughput, in Kio/s",args[1]
             ).as_str());
         println!("Expected throughput : {}", throughput);
-        control_delay = throughput_calcul(throughput*1024f64, packet_size as f64); //throughput in bytes, packet size in bytes
+        control_delay = throughput_calcul(throughput*1024f64, packet_size as f64); //throughput in KiB/s, packet size in bytes
         println!("control_delay will be : {} nano seconds", control_delay);
     }
     
@@ -54,18 +54,20 @@ fn main() {
     //read config and retrieve data
     let config : Config = read_config("./config.toml");
     let dist_addr: Ipv4Addr = match config.num_dist{
+        0 => {println!("Config Error : PC number for dist_adrr is set to 0. Maybe consider using the ./config script."); exit(1)}
         1 => config.ip1.parse().unwrap(),
         2 => config.ip2.parse().unwrap(),
         3 => config.ip3.parse().unwrap(),
         4 => config.ip4.parse().unwrap(),
-        _ => {println!("Config Error :\nUnrecognized PC number :\"{}\", unable to continue.", config.num_dist); exit(1)},
+        _ => {println!("Config Error : Unrecognized PC number :\"{}\", unable to continue.", config.num_dist); exit(1)},
     };
     let local_addr: Ipv4Addr = match config.num_local{
+        0 => {println!("Config Error : PC number for local_adrr is set to 0. Maybe consider using the ./config script."); exit(1)}
         1 => config.ip1.parse().unwrap(),
         2 => config.ip2.parse().unwrap(),
         3 => config.ip3.parse().unwrap(),
         4 => config.ip4.parse().unwrap(),
-        _ => {println!("Config Error :\nUnrecognized PC number :\"{}\", unable to continue.", config.num_local); exit(1)},
+        _ => {println!("Config Error : Unrecognized PC number :\"{}\", unable to continue.", config.num_local); exit(1)},
     };
 
     //init atomic variables, which are used to access data accross threads
@@ -153,14 +155,14 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
             packet_example.push(0); //INIT THE FUTURE WRITE BUFFER WITH FULL RANDOM VALUES (here packet size will be 1448 Bytes so 64kiB)
         }
     let mut sequence_number = 0u64;
-    let mut packet_map: BTreeMap<u64, Duration> = BTreeMap::new();
+    let mut packet_map: BTreeMap<u64, (Duration, u16)> = BTreeMap::new();
     let mut control_delay = Instant::now();
     let start_time = SystemTime::now();
     let mut payload = BenchPayload::new(Sequence as u8); //new payload type 0 -> type Sequence (sets time automatically)
     let addr = IpAddr::V4(dist_addr);
 
     while run.load(Ordering::SeqCst){ //Main sending loop
-        while control_delay.elapsed().as_nanos() < expected_delay{}//waituntill
+        while control_delay.elapsed().as_nanos() < expected_delay {}//void loop to waituntill
         control_delay=Instant::now();
         let mut packet_buffer = packet_example.clone();
         let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr, packet_size); //initialize a new packet
@@ -171,10 +173,9 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
 
         match tx.send_to(packet, addr){
             Ok(_)=>{
-                total_packets += 1; sequence_number += 1; //increment all variables
+                total_packets += 1; sequence_number += 1; //increment counters
                 global_count.store(total_packets, Ordering::SeqCst);
-                packet_map.insert(payload.seq, payload.time.duration_since(start_time).ok().unwrap()); //insert the sent packet to the binaryTree map
-                //println!("bytes envoyés : {}, total_packets : {}", bytes, global_count.load(Ordering::SeqCst));
+                packet_map.insert(payload.seq, (payload.time.duration_since(start_time).ok().unwrap(), packet_size)); //insert the sent packet to the binaryTree map
             }
             Err(e)=>{println!("Error while sending Sequence packet: {}", e)}
         }
@@ -243,7 +244,7 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, packet_size: u16, r
                                 if source == dist_addr{
                                     let rcv_payload : BenchPayload = bincode::deserialize(rcv_packet.payload()).unwrap();
                                     if rcv_payload.payload_type == (UpdateAnswer as u8){
-                                        partial_receiver_count = rcv_payload.count.clone() as i128; 
+                                        partial_receiver_count = rcv_payload.data.clone() as i128; 
                                         partial_count_received = true;
                                     }
                                 }
@@ -305,12 +306,12 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, packet_size: u16, r
                         if source == dist_addr{
                             let rcv_payload : BenchPayload = bincode::deserialize(rcv_packet.payload()).unwrap();
                             if rcv_payload.payload_type == (FinishAnswer as u8){
-                                final_receiver_count = rcv_payload.count.clone() as i128;
+                                final_receiver_count = rcv_payload.data.clone() as i128;
                                 final_count_received = true;
                             }
                         }
                     }
-                    Ok(None) => {}//println!("Timeout reached while waiting for FinishCall answer… Retrying.")}
+                    Ok(None) => {}
                     Err(e) => {println!("Error while waiting for FinishCall answer: {}", e)}
                 }
             }
@@ -389,9 +390,7 @@ fn icmp_ping(dist_addr: Ipv4Addr, run: Arc<AtomicBool>, print_count_ping: Arc<At
         while run.load(Ordering::SeqCst) || print_count_ping.load(Ordering::SeqCst)==2 { // MAIN LOOP OF THE FCT running when atomic runner is true
             match results.recv_timeout(Duration::from_millis(400)) {
                 Ok(result) => match result {
-                    Idle { addr: _ } => {
-                        //println!("Ping out of time on: {}.", addr);
-                    }
+                    Idle { addr: _ } => {}
                     Receive { addr:_, rtt } => { //Compute the average (and partial) data at each new ping
                         average_rtt = ((ping_number*average_rtt)+rtt.as_millis()as i128)/(ping_number+1);
                         partial_average_rtt = ((partial_ping_number*partial_average_rtt)+rtt.as_millis()as i128)/(partial_ping_number+1);
