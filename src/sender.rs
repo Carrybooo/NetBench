@@ -156,21 +156,21 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
     let mut packet_map: BTreeMap<u64, Duration> = BTreeMap::new();
     let mut control_delay = Instant::now();
     let start_time = SystemTime::now();
+    let mut payload = BenchPayload::new(Sequence as u8); //new payload type 0 -> type Sequence (sets time automatically)
+    let addr = IpAddr::V4(dist_addr);
 
-    while run.load(Ordering::SeqCst){
-        while control_delay.elapsed().as_nanos() < expected_delay{}
+    while run.load(Ordering::SeqCst){ //Main sending loop
+        while control_delay.elapsed().as_nanos() < expected_delay{}//waituntill
         control_delay=Instant::now();
         let mut packet_buffer = packet_example.clone();
-        let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
-        let mut payload = BenchPayload::new(Sequence as u8); //new payload type 0 -> type Sequence (sets time automatically)
-        payload.seq = sequence_number.clone(); //set sequence number field
+        let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr, packet_size); //initialize a new packet
+        payload.time = SystemTime::now();
+        payload.seq = sequence_number; //set sequence number field
         let serialized_payload = bincode::serialize(&payload).unwrap();
         packet.set_payload(&serialized_payload.as_slice());
-        packet.set_total_length(packet_size);
 
-
-        match tx.send_to(packet, IpAddr::V4(dist_addr)){
-            Ok(_bytes)=>{
+        match tx.send_to(packet, addr){
+            Ok(_)=>{
                 total_packets += 1; sequence_number += 1; //increment all variables
                 global_count.store(total_packets, Ordering::SeqCst);
                 packet_map.insert(payload.seq, payload.time.duration_since(start_time).ok().unwrap()); //insert the sent packet to the binaryTree map
@@ -231,7 +231,7 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, packet_size: u16, r
             let mut breaker = false;
             while !partial_count_received && !breaker { //Loop until count is received
                 let mut packet_buffer = packet_example.clone();
-                let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
+                let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr, packet_size); //initialize a new packet 
                 let payload = BenchPayload::new(UpdateCall as u8); //new payload type 2 -> type Updatecall
                 let serialized_payload = bincode::serialize(&payload).unwrap();
                 packet.set_payload(&serialized_payload.as_slice());
@@ -267,7 +267,7 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, packet_size: u16, r
             let partial_time: u128 = partial_start.elapsed().as_millis();
             let partial_speed: f64 = (partial_receiver_count as f64 * (packet_size as f64) / 1024f64 / (partial_time as f64/1000f64)).round();
             let partial_delivery_ratio: f64 = ((partial_receiver_count as f64 / partial_total_packets as f64)*100.0).round();
-            let partial_amount: i128 = partial_total_packets * packet_size as i128 / 1024;
+            let partial_amount: i128 = partial_receiver_count * packet_size as i128 / 1024;
             println!( //PARTIAL PRINT
                 "Partial amount transfered : {}KiB\
                 \nPartial average speed : {}KiB/s\
@@ -292,7 +292,7 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, packet_size: u16, r
     let mut breaker = false;
     while !final_count_received && !breaker { //Loop until final count is received
         let mut packet_buffer = packet_example.clone();
-        let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
+        let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr, packet_size); //initialize a new packet 
         let mut payload = BenchPayload::new(FinishCall as u8); //new payload type 4 -> type FinishCall
         payload.step = 0; //FIRST STEP OF THE FINISH CALL
         let serialized_payload = bincode::serialize(&payload).unwrap();
@@ -328,7 +328,7 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, packet_size: u16, r
         let mut receiver_stopped = false;
         while !receiver_stopped{ //continue this loop until no response for 0.5 sec
             let mut packet_buffer = packet_example.clone();
-            let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
+            let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr, packet_size); //initialize a new packet 
             let mut payload = BenchPayload::new(FinishCall as u8); //new payload type 4 -> type FinishCall
             payload.step = 1; //2nd step of the finish call : ack the total count reception
             let serialized_payload = bincode::serialize(&payload).unwrap();
@@ -349,7 +349,7 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, packet_size: u16, r
     //but if we didn't receive the receiver's count, get the value manually
     if total_packets == 0 {total_packets = global_count.load(Ordering::SeqCst) as i128}
     let total_time: u128 = start.elapsed().as_millis();
-    let total_transmitted = total_packets as u128 * packet_size as u128 / 1024 / 1024; 
+    let total_transmitted = final_receiver_count as u128 * packet_size as u128 / 1024 / 1024; 
     let total_speed: f64 = (final_receiver_count as f64 * (packet_size as f64) / 1024f64 / (total_time as f64/1000f64)).round();
     let total_delivery_ratio: f64 = ((final_receiver_count as f64 / total_packets as f64)*100.0).round();
     println!( //LAST PRINT

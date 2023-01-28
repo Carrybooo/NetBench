@@ -52,14 +52,14 @@ pub enum PayloadType {
 
 ///////////////////////////// Other common util functions ////////////////////////////////////////////
 
-pub fn init_ipv4_packet(mut packet: MutableIpv4Packet, local_addr: Ipv4Addr, dist_addr: Ipv4Addr) -> MutableIpv4Packet{
+pub fn init_ipv4_packet(mut packet: MutableIpv4Packet, local_addr: Ipv4Addr, dist_addr: Ipv4Addr, packet_size: u16) -> MutableIpv4Packet{
     packet.set_version(4);
     packet.set_header_length(5);
     packet.set_source(local_addr);
     packet.set_destination(dist_addr);
     packet.set_ttl(64);
     packet.set_next_level_protocol(IpNextHeaderProtocol::new(254u8)); //we don't use any known protocole
-    packet.set_total_length(1024);
+    packet.set_total_length(packet_size);
     return packet;
 }
 

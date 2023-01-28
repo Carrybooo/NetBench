@@ -79,7 +79,7 @@ fn main() {
                         2 => { // UPDATECALL
                             call_ack = false;
                             let mut packet_buffer = [0u8; 1024];
-                            let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet
+                            let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr, 200); //initialize a new packet
                             let mut packet_payload = BenchPayload::new(UpdateAnswer as u8); //new payload type 3 -> type UpdateAnswer  
                             packet_payload.count = partial_packets.clone();
                             let serialized_payload = bincode::serialize(&packet_payload).unwrap();
@@ -96,7 +96,7 @@ fn main() {
                             call_ack = false;
                             let mut packet_buffer = [0u8; 1024];
                             while !call_ack{
-                                let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet
+                                let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr, 200); //initialize a new packet
                                 let mut packet_payload = BenchPayload::new(FinishAnswer as u8); //new payload type 5 -> type FinishAnswer  
                                 packet_payload.count = total_packets.clone();
                                 let serialized_payload = bincode::serialize(&packet_payload).unwrap();
