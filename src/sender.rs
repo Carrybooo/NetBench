@@ -31,22 +31,23 @@ use pnet::transport::TransportChannelType::Layer3;
 fn main() {
     let args: Vec<String> = env::args().collect();//Collect given arguments
 
-    let mut control_delay = 1000000;
-    let mut packet_size = 1024u16;
+    let mut control_delay = 10000; //1M microsecs = 1sec base delay per packet
+    let mut packet_size = 1024u16; //size of the packets, in bytes
 
     if args.len() > 1{
+        println!("env args : {:?}", args);
         packet_size = args[1].parse::<u16>().expect(format!(
             "Incorrect argument value: {:?}. Expected integer, representing desired throughput, in Kio/s",args[1]
             ).as_str());
+        println!("Packet size : {}", packet_size);
     }
     if args.len() > 2{
-        println!("env args : {:?}", args);
-        let throughput : u64 = args[2].parse::<u64>().expect(format!(
+        let throughput = args[2].parse::<f64>().expect(format!(
             "Incorrect argument value: {:?}. Expected integer, representing desired throughput, in Kio/s",args[1]
             ).as_str());
-
-        control_delay = throughput_calcul(throughput, packet_size); //throughput in Kio, packet size in bytes 
-        println!("control_delay will be : {}", control_delay);
+        println!("Expected throughput : {}", throughput);
+        control_delay = throughput_calcul(throughput*1024f64, packet_size as f64); //throughput in bytes, packet size in bytes
+        println!("control_delay will be : {} nano seconds", control_delay);
     }
     
     //const PACKETSIZE: u16 = args[1];
@@ -157,9 +158,7 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
     let start_time = SystemTime::now();
 
     while run.load(Ordering::SeqCst){
-        while control_delay.elapsed().as_micros() < expected_delay{
-            thread::sleep(Duration::from_micros(100));
-        }
+        while control_delay.elapsed().as_nanos() < expected_delay{}
         control_delay=Instant::now();
         let mut packet_buffer = packet_example.clone();
         let mut packet = init_ipv4_packet(MutableIpv4Packet::new(&mut packet_buffer).unwrap(), local_addr, dist_addr); //initialize a new packet 
@@ -187,7 +186,10 @@ fn sender_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, expected_delay: u128
     print_count_sender.store(11, Ordering::SeqCst);
 
     match dump_to_csv("sender",packet_map){
-        Ok(path) => {println!("Results dumped to file : {}", path)}
+        Ok(path) => {
+            println!("Results dumped to file : {}", path);
+            println!("=================================================================");
+        }
         Err(e) => {println!("Error while writing data to CSV file: {}", e)}
     }
 
@@ -263,12 +265,15 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, packet_size: u16, r
             partial_total_packets = total_packets-partial_total_marker;
             partial_total_marker = total_packets.clone();
             let partial_time: u128 = partial_start.elapsed().as_millis();
-            let partial_speed: f64 = (partial_receiver_count as f64 * (packet_size as f64) / 1000f64 / (partial_time as f64/1000f64)).round();
+            let partial_speed: f64 = (partial_receiver_count as f64 * (packet_size as f64) / 1024f64 / (partial_time as f64/1000f64)).round();
             let partial_delivery_ratio: f64 = ((partial_receiver_count as f64 / partial_total_packets as f64)*100.0).round();
+            let partial_amount: i128 = partial_total_packets * packet_size as i128 / 1024;
             println!( //PARTIAL PRINT
-                "Partial average speed : {}Kio/s\
+                "Partial amount transfered : {}KiB\
+                \nPartial average speed : {}KiB/s\
                 \nPartial packet delivery ratio : {}% ({} delivered / {} total)", 
-                partial_speed, 
+                partial_amount,
+                partial_speed,
                 partial_delivery_ratio, 
                 partial_receiver_count, 
                 partial_total_packets
@@ -344,13 +349,15 @@ fn compute_thread(local_addr: Ipv4Addr, dist_addr: Ipv4Addr, packet_size: u16, r
     //but if we didn't receive the receiver's count, get the value manually
     if total_packets == 0 {total_packets = global_count.load(Ordering::SeqCst) as i128}
     let total_time: u128 = start.elapsed().as_millis();
-    let total_speed: f64 = (final_receiver_count as f64 * (packet_size as f64) / 1000f64 / (total_time as f64/1000f64)).round();
+    let total_transmitted = total_packets as u128 * packet_size as u128 / 1024 / 1024; 
+    let total_speed: f64 = (final_receiver_count as f64 * (packet_size as f64) / 1024f64 / (total_time as f64/1000f64)).round();
     let total_delivery_ratio: f64 = ((final_receiver_count as f64 / total_packets as f64)*100.0).round();
     println!( //LAST PRINT
-        "Benchmark lasted for : {}s\
-        \nTotal average speed : {}Kio/s\
+        "Benchmark lasted for : {}s, Total data transmitted : {}MiB\
+        \nTotal average speed : {}KiB/s\
         \nTotal packet delivery ratio : {}% ({} delivered / {} total)",
         total_time/1000,
+        total_transmitted,
         total_speed, 
         total_delivery_ratio, 
         final_receiver_count, 
@@ -467,6 +474,6 @@ fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run: Arc<AtomicBool>, p
 
 //-----------------Local util functions-------------------//
 ///compute the delay needed between 2 packets to achieve a desired throughput for a specific packet size. (all in KiB).
-fn throughput_calcul(throughput: u64, size: u16) -> u128{ 
-    (1000000/(size as u64)/1024/throughput) as u128 //return the needed delay for 1 packet the delay in microsecond.
+fn throughput_calcul(throughput: f64, size: f64) -> u128{
+    ((size/throughput) * 1000000000f64) as u128 //return the needed delay for 1 packet the delay in microsecond.
 }
