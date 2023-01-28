@@ -76,7 +76,7 @@ pub fn purge_receiver(rcv_iterator: &mut Ipv4TransportChannelIterator){
 }
 
 pub fn dump_to_csv(type_of: &str, map: BTreeMap<u64, Duration>) -> Result<String, Box<dyn Error>> {
-    let path=format!("./data/{}_{}.csv",type_of,Local::now().time());
+    let path=format!("./data/{}_{}.csv",type_of,Local::now().format("%Y/%m/%d_%H:%M:%S"));
     let res = path.clone();
 
     let mut writer = csv::Writer::from_path(path)?;

@@ -383,31 +383,32 @@ fn icmp_ping(dist_addr: Ipv4Addr, run: Arc<AtomicBool>, print_count_ping: Arc<At
 
     pinger.run_pinger(); //launch the pinger
 
-    while run.load(Ordering::SeqCst) { // MAIN LOOP OF THE FCT running when atomic runner is true
-        match results.recv_timeout(Duration::from_millis(400)) {
-            Ok(result) => match result {
-                Idle { addr: _ } => {
-                    //println!("Ping out of time on: {}.", addr);
-                }
-                Receive { addr:_, rtt } => { //Compute the average (and partial) data at each new ping
-                    average_rtt = ((ping_number*average_rtt)+rtt.as_millis()as i128)/(ping_number+1);
-                    partial_average_rtt = ((partial_ping_number*partial_average_rtt)+rtt.as_millis()as i128)/(partial_ping_number+1);
-                    ping_number += 1;
-                    partial_ping_number += 1;
-                }
-            },
-            Err(_) => {}, //ping timeout -> not critical…
-        }
-        
-        if print_count_ping.load(Ordering::SeqCst)==2 {   // PERIODIC STAT PRINT triggered after the compute_thread periodic print
-            println!("Partial average RTT: {}ms on {} pings", partial_average_rtt, partial_ping_number);
-            partial_average_rtt=0;
-            partial_ping_number=0;
-            print_count_ping.store(3, Ordering::SeqCst);
-        }    
-    }
     while print_count_ping.load(Ordering::SeqCst)!=12 {    //waiting for LAST PRINT BEFORE CLOSING
         thread::sleep(Duration::from_millis(10));
+
+        while run.load(Ordering::SeqCst) || print_count_ping.load(Ordering::SeqCst)==2 { // MAIN LOOP OF THE FCT running when atomic runner is true
+            match results.recv_timeout(Duration::from_millis(400)) {
+                Ok(result) => match result {
+                    Idle { addr: _ } => {
+                        //println!("Ping out of time on: {}.", addr);
+                    }
+                    Receive { addr:_, rtt } => { //Compute the average (and partial) data at each new ping
+                        average_rtt = ((ping_number*average_rtt)+rtt.as_millis()as i128)/(ping_number+1);
+                        partial_average_rtt = ((partial_ping_number*partial_average_rtt)+rtt.as_millis()as i128)/(partial_ping_number+1);
+                        ping_number += 1;
+                        partial_ping_number += 1;
+                    }
+                },
+                Err(_) => {}, //ping timeout -> not critical…
+            }
+            
+            if print_count_ping.load(Ordering::SeqCst)==2 {   // PERIODIC STAT PRINT triggered after the compute_thread periodic print
+                println!("Partial average RTT: {}ms on {} pings", partial_average_rtt, partial_ping_number);
+                partial_average_rtt=0;
+                partial_ping_number=0;
+                print_count_ping.store(3, Ordering::SeqCst);
+            }    
+        }
     }
     println!("Total average RTT: {}ms on {} pings", average_rtt, ping_number);
     print_count_ping.store(13, Ordering::SeqCst);
@@ -426,46 +427,48 @@ fn icmp_route(dest_addr: Ipv4Addr, local_addr: Ipv4Addr, run: Arc<AtomicBool>, p
     let mut final_vec: Vec<(u32, IpAddr)> = Vec::new();
     let mut breaker = false;
     
-    while run.load(Ordering::SeqCst){ // MAIN LOOP OF THE FCT running when atomic runner is true
-        while src_ip != IpAddr::V4(dest_addr){ // loop to find the route (which is when the ICMP answer comes from the target address)
-            ttl_counter += 1;
-            sequence_counter += 1;
-
-            let packetmsg = Icmpv4Message::Echo { identifier: 1, sequence: sequence_counter, payload: vec![] };
-            let packet = Icmpv4Packet { typ: 8, code: 0, checksum: 0, message: packetmsg}; // Build packet type 8 (echo request)
-            let mut icmp_socket = IcmpSocket4::try_from(local_addr).unwrap();
-            icmp_socket.set_max_hops(ttl_counter);
-            icmp_socket.set_timeout(Some(Duration::from_millis(300)));
- 
-            icmp_socket.send_to(dest_addr, packet).expect("Error while sending echo request");//sending echo request
-
-            match icmp_socket.rcv_from() { //listening for answer
-                Ok((_packet, src)) => {
-                    let sender_address = src.as_socket_ipv4().unwrap();//getting the adress from the answer
-                    src_ip = IpAddr::V4(*sender_address.ip()); //extracting ip
-                    addr_vec.push((ttl_counter, src_ip)); //pushing in stockage vector
-                }
-                Err(_) => {break}//break out of this loop if it fails during route establishment
-            }
-        }
-
-        while print_count_route.load(Ordering::SeqCst)!=3 {  // PERIODIC STAT PRINT WAITING triggered after the icmp_ping periodic print
-            thread::sleep(Duration::from_millis(10));
-            if !run.load(Ordering::SeqCst) {breaker=true; break}; //set breaker to true to break out of main loop and avoid double-prints
-        }
-        if !breaker {
-        src_ip= "0.0.0.0".parse().unwrap();
-        println!("Route to Dist addr : {:?}", addr_vec);// printing stockage vector when the route has been found
-        final_vec = addr_vec.clone();
-        addr_vec.clear();
-        ttl_counter = 0;
-        };
-        if print_count_route.load(Ordering::SeqCst) == 3 {
-            print_count_route.store(0, Ordering::SeqCst);
-        }
-    }
     while print_count_route.load(Ordering::SeqCst)!=13 {
         thread::sleep(Duration::from_millis(10));
+
+        while run.load(Ordering::SeqCst) || print_count_route.load(Ordering::SeqCst)==3{ // MAIN LOOP OF THE FCT running when atomic runner is true
+            while src_ip != IpAddr::V4(dest_addr){ // loop to find the route (which is when the ICMP answer comes from the target address)
+                ttl_counter += 1;
+                sequence_counter += 1;
+
+                let packetmsg = Icmpv4Message::Echo { identifier: 1, sequence: sequence_counter, payload: vec![] };
+                let packet = Icmpv4Packet { typ: 8, code: 0, checksum: 0, message: packetmsg}; // Build packet type 8 (echo request)
+                let mut icmp_socket = IcmpSocket4::try_from(local_addr).unwrap();
+                icmp_socket.set_max_hops(ttl_counter);
+                icmp_socket.set_timeout(Some(Duration::from_millis(300)));
+    
+                icmp_socket.send_to(dest_addr, packet).expect("Error while sending echo request");//sending echo request
+
+                match icmp_socket.rcv_from() { //listening for answer
+                    Ok((_packet, src)) => {
+                        let sender_address = src.as_socket_ipv4().unwrap();//getting the adress from the answer
+                        src_ip = IpAddr::V4(*sender_address.ip()); //extracting ip
+                        addr_vec.push((ttl_counter, src_ip)); //pushing in stockage vector
+                    }
+                    Err(_) => {break}//break out of this loop if it fails during route establishment
+                }
+            }
+
+            while print_count_route.load(Ordering::SeqCst)!=3 {  // PERIODIC STAT PRINT WAITING triggered after the icmp_ping periodic print
+                thread::sleep(Duration::from_millis(10));
+                if !run.load(Ordering::SeqCst) {breaker=true; break}; //set breaker to true to break out of main loop and avoid double-prints
+            }
+            if !breaker {
+            src_ip= "0.0.0.0".parse().unwrap();
+            println!("Route to Dist addr : {:?}\
+            \n=================================================================", addr_vec);// printing stockage vector when the route has been found
+            final_vec = addr_vec.clone();
+            addr_vec.clear();
+            ttl_counter = 0;
+            };
+            if print_count_route.load(Ordering::SeqCst) == 3 {
+                print_count_route.store(0, Ordering::SeqCst);
+            }
+        }
     }
     println!("Last route to Dist addr : {:?}", final_vec);//Last print, printing the last route used
     print_count_route.store(1000, Ordering::SeqCst);
