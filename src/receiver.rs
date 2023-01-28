@@ -105,10 +105,8 @@ fn main() {
                                 }
                                 match rcv_iterator.next(){ //NEED A FINAL ACK before leaving
                                     Ok((ack_packet, source)) => {
-                                        println!("DEBUG, FINAL ACK LOOP pckt rcvd: source {}", source);
                                         if source == dist_addr{
                                             let ack_payload : BenchPayload = bincode::deserialize(ack_packet.payload()).unwrap();
-                                            println!("DEBUG, ackpayload : step :{} type:{}", payload.step, payload.payload_type);
                                             if ack_payload.step == 1 && ack_payload.payload_type == (FinishCall as u8){
                                                 call_ack = true;
                                                 terminate = true;
