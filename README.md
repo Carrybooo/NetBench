@@ -1,6 +1,6 @@
 ## NETBENCH
 
-Cette partie du projet est un outil de benchmark que nous avons développé pour mesurer plusieurs caractéristiques réseau, à savoir:
+Netbench est un outil de benchmark que nous avons développé pour mesurer plusieurs caractéristiques réseau, à savoir:
 
 - Le débit moyen
 - Le Packet Delivery Ratio (grâce au nombre de paquets transmis et au nombre de packets reçus)
@@ -9,7 +9,7 @@ Cette partie du projet est un outil de benchmark que nous avons développé pour
 - La route utilisée par les paquets
 
 Il peut pour l’instant prendre 2 paramètres en entrée : 
-- La taille du paquet en octets (compris entre 64 et 1500 octets, cela comprend le header)
+- La taille du paquet en octets (compris entre 100 et 1500 octets, cela comprend le header)
 - Le débit souhaité en kilo-octets.
 
 Cet outil comporte plusieurs parties : 
