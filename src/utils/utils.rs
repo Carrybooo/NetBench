@@ -97,7 +97,7 @@ impl BenchPayload {
 #[repr(u8)]
 pub enum PayloadType {
     Sequence = 0,       //Sequence --- Numbered packet.
-    Clock = 1,          //Clock --- used for synchro (pas encore trouvé comment)
+    Clock = 1,          //Clock --- used for synchro (need GPS module for that)
     UpdateCall = 2,     //UpdateCall ---
     UpdateAnswer = 3,   //UpdateAnswer --- Contains partial count
     FinishCall = 4,     //FinishCall ---
